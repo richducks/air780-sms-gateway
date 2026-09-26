@@ -1,0 +1,7 @@
+# Offline update fallback: mount prebuilt application files over the last
+# working image when Docker Hub is unavailable. Build frontend/dist locally.
+services:
+  sms-gateway:
+    volumes:
+      - ./sms_gateway:/app/sms_gateway:ro
+      - ./frontend/dist:/app/frontend/dist:ro

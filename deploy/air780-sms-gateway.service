@@ -1,0 +1,23 @@
+[Unit]
+Description=Air780 USB SMS Gateway
+After=network-online.target dev-ttyACM0.device
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+Group=dialout
+WorkingDirectory=CHANGE_PROJECT_DIR
+EnvironmentFile=CHANGE_PROJECT_DIR/.env
+ExecStart=/usr/bin/python3 -m sms_gateway
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=CHANGE_PROJECT_DIR
+
+[Install]
+WantedBy=multi-user.target
+

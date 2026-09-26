@@ -1,0 +1,8 @@
+# Allow members of dialout to access all AirM2M USB serial interfaces. The
+# generic ModemManager probe misidentifies this LuatOS device and competes with
+# the gateway for its AT port, so keep ModemManager away from these ports.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="19d1", ATTRS{idProduct}=="0001", GROUP="dialout", MODE="0660", TAG+="systemd", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
+
+# The SMS firmware also exposes an RNDIS network adapter. Keep NetworkManager
+# from installing its default route and DNS; serial/AT ports remain available.
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="19d1", ATTRS{idProduct}=="0001", ENV{NM_UNMANAGED}="1"

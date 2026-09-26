@@ -1,0 +1,8 @@
+[Match]
+Driver=rndis_host
+
+[Network]
+DHCP=no
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+ConfigureWithoutCarrier=yes

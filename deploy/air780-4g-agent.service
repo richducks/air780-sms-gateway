@@ -1,0 +1,18 @@
+[Unit]
+Description=Air780 4G network switch
+After=systemd-networkd.service
+Requires=systemd-networkd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/air780-4g-agent.py
+Restart=on-failure
+RuntimeDirectory=air780-4g
+RuntimeDirectoryMode=0755
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/systemd/network /run/air780-4g
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+#!/bin/sh
+interface=$1
+action=$2
+case "$action" in
+  up|dhcp4-change|dhcp6-change|connectivity-change) ;;
+  *) exit 0 ;;
+esac
+device_path=$(readlink -f "/sys/class/net/$interface/device" 2>/dev/null) || exit 0
+path=$device_path
+while [ "$path" != "/" ]; do
+  vendor=$(cat "$path/idVendor" 2>/dev/null || true)
+  product=$(cat "$path/idProduct" 2>/dev/null || true)
+  if [ "$vendor" = "19d1" ] && [ "$product" = "0001" ]; then
+    nmcli device set "$interface" managed no >/dev/null 2>&1 || true
+    ip route del default dev "$interface" >/dev/null 2>&1 || true
+    ip -6 route del default dev "$interface" >/dev/null 2>&1 || true
+    resolvectl revert "$interface" >/dev/null 2>&1 || true
+    logger -t air780-network-guard "blocked Air780 RNDIS interface $interface from routing and DNS"
+    exit 0
+  fi
+  path=$(dirname "$path")
+done
+exit 0

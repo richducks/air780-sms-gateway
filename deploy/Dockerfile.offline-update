@@ -1,0 +1,5 @@
+# Repackage the current locally installed gateway without contacting Docker Hub.
+# Use only on a host that already has air780-sms-gateway:local.
+FROM air780-sms-gateway:local
+COPY --chown=gateway:gateway sms_gateway/ /app/sms_gateway/
+COPY --chown=gateway:gateway frontend/dist/ /app/frontend/dist/
