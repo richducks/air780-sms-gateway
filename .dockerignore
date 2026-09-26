@@ -1,0 +1,15 @@
+.git
+.env
+.env.docker
+*.db
+__pycache__
+*.pyc
+frontend/node_modules
+frontend/dist
+tools
+vendor
+_temp
+log
+config
+project
+Luatools_v3.exe

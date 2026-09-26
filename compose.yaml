@@ -1,0 +1,23 @@
+services:
+  sms-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: air780-sms-gateway:local
+    container_name: air780-sms-gateway
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    ports:
+      - "8787:8787"
+    volumes:
+      - sms-data:/data
+      - /run/air780-4g:/run/air780-4g:ro
+    # Air780 每台会产生多个 ttyACM。privileged 能支持新增设备和热插拔，
+    # 建议只在专用、可信的短信网关主机上使用。更严格的固定设备方案见部署文档。
+    privileged: true
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  sms-data:
