@@ -64,8 +64,14 @@ class Gateway:
                              name=f"webhook-sent-{message_id}").start()
 
     def _received(self, device_id: str, sms: ReceivedSms) -> None:
-        message_id = self.store.create("inbound", sms.sender, sms.body, "received", sms.index,
-                                       device_id=device_id)
+        blocked = self.store.is_blacklisted(sms.sender)
+        message_id = self.store.create(
+            "inbound", sms.sender, sms.body, "blacklisted" if blocked else "received",
+            sms.index, device_id=device_id, blacklisted=blocked
+        )
+        if blocked:
+            log.info("stored SMS from blacklisted number %s without notifications", sms.sender)
+            return
         event = {"event": "sms.received", "device_id": device_id,
                  "device_label": self._device_label(device_id),
                  "message": self.store.get(message_id)}
@@ -356,6 +362,9 @@ def handler_factory(gateway: Gateway):
             if parsed.path == "/api/v1/contacts":
                 self._json(HTTPStatus.OK, {"contacts": gateway.store.list_contacts()})
                 return
+            if parsed.path == "/api/v1/blacklist":
+                self._json(HTTPStatus.OK, {"blacklist": gateway.store.list_blacklist()})
+                return
             if parsed.path == "/api/v1/network/4g":
                 self._json(HTTPStatus.OK, gateway.four_g({'action': 'status'}))
                 return
@@ -530,6 +539,21 @@ def handler_factory(gateway: Gateway):
                 except (ValueError, json.JSONDecodeError, AttributeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
+            blacklist_match = re.fullmatch(r"/api/v1/blacklist/([^/]+)", urlparse(self.path).path)
+            if blacklist_match:
+                try:
+                    phone = unquote(blacklist_match.group(1))
+                    if not re.fullmatch(r"\+?[0-9]{5,20}", phone):
+                        raise ValueError("号码须为 5–20 位数字，可带开头的 +")
+                    payload = self._payload()
+                    label = str(payload.get("label", "")).strip()
+                    note = str(payload.get("note", "")).strip()
+                    if len(label) > 80 or len(note) > 500:
+                        raise ValueError("备注名称最多 80 个字符，详细备注最多 500 个字符")
+                    self._json(HTTPStatus.OK, gateway.store.upsert_blacklist(phone, label, note))
+                except (ValueError, json.JSONDecodeError, AttributeError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
             match = re.fullmatch(r"/api/v1/contacts/([^/]+)", urlparse(self.path).path)
             if not match:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -566,6 +590,13 @@ def handler_factory(gateway: Gateway):
                     self._json(HTTPStatus.OK, {"ok": True})
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "contact not found"})
+                return
+            blacklist_match = re.fullmatch(r"/api/v1/blacklist/([^/]+)", urlparse(self.path).path)
+            if blacklist_match:
+                if gateway.store.delete_blacklist(unquote(blacklist_match.group(1))):
+                    self._json(HTTPStatus.OK, {"ok": True})
+                else:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "blacklist entry not found"})
                 return
             dingtalk_match = re.fullmatch(r"/api/v1/integrations/dingtalk/([^/]+)",
                                          urlparse(self.path).path)
