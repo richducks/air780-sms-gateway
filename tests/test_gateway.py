@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from sms_gateway.modem import SerialModem
 from sms_gateway.store import MessageStore
+from sms_gateway.app import Gateway
+from sms_gateway.modem import ReceivedSms
 from sms_gateway.webhook import deliver, deliver_feishu, deliver_dingtalk
 from urllib.parse import parse_qs, urlsplit
 import base64
@@ -69,6 +71,33 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(reopened.get(message_id)["body"], "通知")
             reopened.set_favorite(message_id, False)
             self.assertEqual(reopened.get(message_id)["favorite"], 0)
+
+    def test_blacklist_archives_messages_and_persists(self):
+        with tempfile.NamedTemporaryFile() as db:
+            store = MessageStore(db.name)
+            store.upsert_blacklist("10086", "广告", "不通知")
+            self.assertTrue(store.is_blacklisted("10086"))
+            message_id = store.create("inbound", "10086", "促销", "blacklisted",
+                                      device_id="air780-a", blacklisted=True)
+            reopened = MessageStore(db.name)
+            self.assertEqual(reopened.get(message_id)["blacklisted"], 1)
+            self.assertEqual(reopened.list_blacklist()[0]["message_count"], 1)
+            reopened.delete_blacklist("10086")
+            self.assertFalse(reopened.is_blacklisted("10086"))
+            self.assertEqual(reopened.get(message_id)["body"], "促销")
+
+    @patch("sms_gateway.app.threading.Thread")
+    def test_blacklisted_inbound_sms_skips_all_notifications(self, thread):
+        with tempfile.NamedTemporaryFile() as db:
+            gateway = Gateway.__new__(Gateway)
+            gateway.store = MessageStore(db.name)
+            gateway.store.upsert_blacklist("10010", "广告")
+            gateway._device_label = lambda _device_id: "测试设备"
+            gateway._received("air780-a", ReceivedSms(3, "10010", "推广内容"))
+            thread.assert_not_called()
+            message = gateway.store.list()[0]
+            self.assertEqual(message["status"], "blacklisted")
+            self.assertEqual(message["blacklisted"], 1)
 
     @patch("sms_gateway.webhook.urllib.request.urlopen")
     def test_webhook_signature(self, urlopen):
