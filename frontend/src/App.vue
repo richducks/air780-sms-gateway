@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const view = ref('messages')
-const navIds = ['messages','devices','contacts','favorites','settings']
-const navLabels = {messages:'短信',devices:'设备',contacts:'通讯录',favorites:'收藏',settings:'设置'}
+const navIds = ['messages','devices','contacts','favorites','blacklist','settings']
+const navLabels = {messages:'短信',devices:'设备',contacts:'通讯录',favorites:'收藏',blacklist:'黑名单',settings:'设置'}
 const savedNavOrder = JSON.parse(localStorage.getItem('sms.navOrder') || '[]')
 const navOrder = ref([...savedNavOrder.filter(id => navIds.includes(id)), ...navIds.filter(id => !savedNavOrder.includes(id))])
 const navDragging = ref('')
@@ -12,11 +12,14 @@ const fourGBusy = ref(false)
 const fourGError = ref('')
 const networkForDevice = device => fourG.value.interfaces?.find(item => item.device_id === device.device_id)
   || (devices.value.length === 1 && fourG.value.interfaces?.length === 1 ? fourG.value.interfaces[0] : null)
-const sidebarCollapsed = ref(localStorage.getItem('sms.sidebarCollapsed') === 'true')
-const sidebarWidth = ref(Number(localStorage.getItem('sms.sidebarWidth') || 200))
+const sidebarWidth = ref(localStorage.getItem('sms.sidebarCollapsed') === 'true'
+  ? 72
+  : Number(localStorage.getItem('sms.sidebarWidth') || 200))
+const sidebarCollapsed = computed(() => sidebarWidth.value < 120)
 const messages = ref([])
 const devices = ref([])
 const contacts = ref([])
+const blacklist = ref([])
 const selectedConversationKey = ref(null)
 const mobileConversationOpen = ref(false)
 const deviceFilter = ref('all')
@@ -29,6 +32,10 @@ const contactEditorOpen = ref(false)
 const contactOriginalPhone = ref('')
 const contactDraft = ref({phone:'',name:'',note:''})
 const contactError = ref('')
+const blacklistEditorOpen = ref(false)
+const blacklistOriginalPhone = ref('')
+const blacklistDraft = ref({phone:'',label:'',note:''})
+const blacklistError = ref('')
 const chatDrafts = ref({})
 const chatSending = ref(false)
 const chatError = ref('')
@@ -67,7 +74,7 @@ let suppressNavClick = false
 function conversationKey(message) { return `${message.device_id || ''}\u0000${message.phone}` }
 const conversations = computed(() => {
   const byKey = new Map()
-  for (const message of messages.value) {
+  for (const message of messages.value.filter(message => !message.blacklisted)) {
     const key = conversationKey(message)
     if (!byKey.has(key)) byKey.set(key, {key, phone:message.phone, device_id:message.device_id, latest:message})
   }
@@ -89,6 +96,7 @@ const activeDeviceOnline = computed(() => devices.value.some(d =>
 ))
 const onlineCount = computed(() => devices.value.filter(d => d.status === 'online').length)
 const favorites = computed(() => messages.value.filter(m => m.favorite))
+const blacklistedMessages = computed(() => messages.value.filter(m => m.blacklisted))
 const contactByPhone = phone => contacts.value.find(c => c.phone === phone) || null
 const contactName = phone => contactByPhone(phone)?.name || phone
 const contactAvatar = phone => (contactByPhone(phone)?.name || phone || '?').slice(0, 2)
@@ -182,18 +190,13 @@ async function toggleFourG() {
   finally { fourGBusy.value = false }
 }
 
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
-  localStorage.setItem('sms.sidebarCollapsed', String(sidebarCollapsed.value))
-}
 function startSidebarDrag(event) {
   if (window.innerWidth <= 620) return
   event.preventDefault()
-  sidebarCollapsed.value = false
-  localStorage.setItem('sms.sidebarCollapsed', 'false')
-  const move = e => { sidebarWidth.value = Math.max(168, Math.min(280, e.clientX)) }
+  const move = e => { sidebarWidth.value = Math.max(64, Math.min(280, e.clientX)) }
   const stop = () => {
     localStorage.setItem('sms.sidebarWidth', String(sidebarWidth.value))
+    localStorage.removeItem('sms.sidebarCollapsed')
     window.removeEventListener('pointermove', move)
     window.removeEventListener('pointerup', stop)
     stopSidebarDrag = null
@@ -215,10 +218,11 @@ async function refresh() {
   if (loading.value) return
   loading.value = true
   try {
-    const [m, d, c, i, ding, network] = await Promise.all([api('/api/v1/messages?limit=200'), api('/api/v1/devices'), api('/api/v1/contacts'), api('/api/v1/integrations/feishu'), api('/api/v1/integrations/dingtalk'), api('/api/v1/network/4g').catch(exc => ({available:false,enabled:false,interfaces:[],error:exc.message}))])
+    const [m, d, c, b, i, ding, network] = await Promise.all([api('/api/v1/messages?limit=200'), api('/api/v1/devices'), api('/api/v1/contacts'), api('/api/v1/blacklist'), api('/api/v1/integrations/feishu'), api('/api/v1/integrations/dingtalk'), api('/api/v1/network/4g').catch(exc => ({available:false,enabled:false,interfaces:[],error:exc.message}))])
     messages.value = m.messages
     devices.value = d.devices
     contacts.value = c.contacts
+    blacklist.value = b.blacklist
     integrations.value = i
     dingtalkIntegrations.value = ding
     fourG.value = network
@@ -277,6 +281,31 @@ async function deleteContact(contact) {
   try {
     await api(`/api/v1/contacts/${encodeURIComponent(contact.phone)}`, {method:'DELETE'})
     contacts.value = contacts.value.filter(c => c.phone !== contact.phone)
+  } catch (e) { error.value = e.message }
+}
+function editBlacklist(phone = '') {
+  const item = blacklist.value.find(entry => entry.phone === phone)
+  blacklistOriginalPhone.value = item?.phone || ''
+  blacklistDraft.value = {phone:phone || '', label:item?.label || '', note:item?.note || ''}
+  blacklistError.value = ''
+  blacklistEditorOpen.value = true
+}
+async function saveBlacklist() {
+  const phone = blacklistDraft.value.phone.trim()
+  blacklistError.value = ''
+  try {
+    await api(`/api/v1/blacklist/${encodeURIComponent(phone)}`, {
+      method:'PUT', body:JSON.stringify({label:blacklistDraft.value.label, note:blacklistDraft.value.note})
+    })
+    blacklistEditorOpen.value = false
+    await refresh()
+  } catch (e) { blacklistError.value = e.message }
+}
+async function deleteBlacklist(item) {
+  if (!confirm(`确认将“${item.label || item.phone}”移出黑名单？已归档的黑名单短信仍会保留。`)) return
+  try {
+    await api(`/api/v1/blacklist/${encodeURIComponent(item.phone)}`, {method:'DELETE'})
+    await refresh()
   } catch (e) { error.value = e.message }
 }
 function fmt(value) {
@@ -496,17 +525,17 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
 </script>
 
 <template>
-  <div class="shell" :class="{'chat-open':view==='messages' && mobileConversationOpen, 'sidebar-collapsed':sidebarCollapsed}" :style="{'--sidebar-width':`${sidebarCollapsed ? 72 : sidebarWidth}px`}">
+  <div class="shell" :class="{'chat-open':view==='messages' && mobileConversationOpen, 'sidebar-collapsed':sidebarCollapsed}" :style="{'--sidebar-width':`${sidebarWidth}px`}">
     <aside class="sidebar" aria-label="主菜单">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 5.5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9l-4 3v-3.2a2 2 0 0 1-2-1.8v-8a2 2 0 0 1 2-2z"/><path d="M7.5 10h9M7.5 13.5h6"/></svg></span><span class="brand-name">短信</span><button class="sidebar-toggle" type="button" :aria-label="sidebarCollapsed?'展开菜单栏':'收起菜单栏'" :title="sidebarCollapsed?'展开菜单栏':'收起菜单栏'" @click="toggleSidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.5h15v13h-15zM9.5 5.5v13"/><path :d="sidebarCollapsed?'m13 9 3 3-3 3':'m16 9-3 3 3 3'"/></svg></button></div>
       <nav aria-label="主导航">
         <button v-for="id in navOrder" :key="id" :data-nav-id="id" :class="{active:view===id,dragging:navDragging===id}" :title="`${navLabels[id]} · 拖动排序；Alt+↑/↓ 调整`" :aria-label="navLabels[id]" draggable="true" @pointerdown="startNavPointer($event,id)" @dragstart="navDragging=id; $event.dataTransfer.setData('text/plain',id)" @dragend="navDragging=''" @dragenter.prevent="moveNav(navDragging,id)" @dragover.prevent @drop="dropNav(id,$event)" @keydown.alt.up.prevent="stepNav(id,-1)" @keydown.alt.down.prevent="stepNav(id,1)" @click="clickNav(id,$event)">
           <svg v-if="id==='messages'" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.3 5.3h13.4a2.3 2.3 0 0 1 2.3 2.3v8.1a2.3 2.3 0 0 1-2.3 2.3H9.5L4 21v-3.4a2.3 2.3 0 0 1-1-1.9V7.6a2.3 2.3 0 0 1 2.3-2.3z"/><path d="M7.5 10h9M7.5 13.5H14"/></svg>
           <svg v-else-if="id==='devices'" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2.8"/><path d="M10 5.5h4M10 18.3h4"/><circle cx="12" cy="12" r="2.2"/></svg>
           <svg v-else-if="id==='contacts'" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="15" height="18" rx="2.5"/><path d="M5 7H3M5 12H3M5 17H3"/><circle cx="12.5" cy="9" r="2"/><path d="M8.8 16.5c.5-1.9 1.7-2.8 3.7-2.8s3.2.9 3.7 2.8"/></svg>
           <svg v-else-if="id==='favorites'" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 3.1 6.4 7.1 1-5.1 5 .9 7-6-3.3-6 3.3.9-7-5.1-5 7.1-1z"/></svg>
+          <svg v-else-if="id==='blacklist'" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6 18 12-12"/></svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 2.9h3.4l.5 2.1c.6.2 1.2.4 1.7.7l1.9-1.1 2.4 2.4-1.1 1.9c.3.5.5 1.1.7 1.7l2.1.5v3.4l-2.1.5c-.2.6-.4 1.2-.7 1.7l1.1 1.9-2.4 2.4-1.9-1.1c-.5.3-1.1.5-1.7.7l-.5 2.1h-3.4l-.5-2.1c-.6-.2-1.2-.4-1.7-.7l-1.9 1.1-2.4-2.4 1.1-1.9c-.3-.5-.5-1.1-.7-1.7l-2.1-.5v-3.4l2.1-.5c.2-.6.4-1.2.7-1.7L3.8 7l2.4-2.4 1.9 1.1c.5-.3 1.1-.5 1.7-.7z"/><circle cx="12" cy="12.8" r="3.1"/></svg>
-          <span>{{ navLabels[id] }}</span><b v-if="id==='messages'">{{ messages.length }}</b><i v-else-if="id==='devices'" :class="onlineCount?'ok':''">{{ onlineCount }}</i><i v-else-if="id==='contacts'">{{ contacts.length }}</i><i v-else-if="id==='favorites'">{{ favorites.length }}</i><span class="nav-grip" aria-hidden="true">⋮⋮</span>
+          <span>{{ navLabels[id] }}</span><b v-if="id==='messages'">{{ messages.length-blacklistedMessages.length }}</b><i v-else-if="id==='devices'" :class="onlineCount?'ok':''">{{ onlineCount }}</i><i v-else-if="id==='contacts'">{{ contacts.length }}</i><i v-else-if="id==='favorites'">{{ favorites.length }}</i><i v-else-if="id==='blacklist'">{{ blacklistedMessages.length }}</i><span class="nav-grip" aria-hidden="true">⋮⋮</span>
         </button>
       </nav>
       <div class="sidebar-foot">
@@ -536,7 +565,7 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
       </section>
       <main class="detail-pane chat-pane">
         <template v-if="activeConversation">
-          <header class="chat-header"><button type="button" class="chat-back" aria-label="返回会话列表" @click="mobileConversationOpen=false">‹</button><span class="conversation-avatar">{{ contactAvatar(activeConversation.phone) }}</span><span class="chat-contact"><strong>{{ contactName(activeConversation.phone) }}</strong><small>{{ activeConversation.phone }} · {{ deviceName(activeConversation.device_id) }} · {{ activeDeviceOnline?'设备在线':'设备离线' }}</small></span><button type="button" class="contact-edit" @click="editContact(activeConversation.phone)">{{ contactByPhone(activeConversation.phone)?'编辑资料':'存为联系人' }}</button></header>
+          <header class="chat-header"><button type="button" class="chat-back" aria-label="返回会话列表" @click="mobileConversationOpen=false">‹</button><span class="conversation-avatar">{{ contactAvatar(activeConversation.phone) }}</span><span class="chat-contact"><strong>{{ contactName(activeConversation.phone) }}</strong><small>{{ activeConversation.phone }} · {{ deviceName(activeConversation.device_id) }} · {{ activeDeviceOnline?'设备在线':'设备离线' }}</small></span><button type="button" class="contact-edit danger" @click="editBlacklist(activeConversation.phone)">加入黑名单</button><button type="button" class="contact-edit" @click="editContact(activeConversation.phone)">{{ contactByPhone(activeConversation.phone)?'编辑资料':'存为联系人' }}</button></header>
           <div ref="chatHistory" class="chat-history" role="log" aria-label="短信对话记录">
             <div v-for="m in conversationMessages" :key="m.id" :data-message-id="m.id" class="chat-line" :class="m.direction==='outbound'?'outbound':'inbound'">
               <div class="chat-bubble"><div class="chat-text">{{ m.body }}</div><div class="chat-meta"><button type="button" class="favorite-toggle" :class="{saved:m.favorite}" :aria-label="m.favorite?'取消收藏短信':'收藏短信'" :title="m.favorite?'取消收藏':'收藏短信'" @click="toggleFavorite(m)">{{ m.favorite?'★':'☆' }}</button><time>{{ fmt(m.created_at) }}</time><span v-if="m.direction==='outbound'">{{ m.status==='failed'?'发送失败':m.status==='queued'?'发送中':'已发送' }}</span></div><div v-if="m.error" class="chat-error">{{ m.error }}</div></div>
@@ -549,7 +578,7 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
     </template>
 
     <main v-else class="page-pane">
-      <header class="page-head"><div><h1>{{ view==='devices'?'设备':view==='contacts'?'通讯录':view==='favorites'?'收藏':'设置' }}</h1><p>{{ view==='devices'?'管理短信设备和 4G 网络':view==='contacts'?'给号码添加姓名和备注，方便识别短信来源':view==='favorites'?'保存重要短信，随时返回原会话':'连接与界面偏好' }}</p></div><button v-if="view==='contacts'" class="primary compact" type="button" @click="editContact()">添加联系人</button></header>
+      <header class="page-head"><div><h1>{{ view==='devices'?'设备':view==='contacts'?'通讯录':view==='favorites'?'收藏':view==='blacklist'?'黑名单':'设置' }}</h1><p>{{ view==='devices'?'管理短信设备和 4G 网络':view==='contacts'?'给号码添加姓名和备注，方便识别短信来源':view==='favorites'?'保存重要短信，随时返回原会话':view==='blacklist'?'拦截指定号码的机器人通知，并单独保存收到的短信':'连接与界面偏好' }}</p></div><button v-if="view==='contacts'" class="primary compact" type="button" @click="editContact()">添加联系人</button><button v-else-if="view==='blacklist'" class="primary compact" type="button" @click="editBlacklist()">添加号码</button></header>
       <section v-if="view==='devices'" class="device-table" aria-label="设备列表">
         <div v-for="d in devices" :key="d.device_id" class="device-line">
           <div class="device-identity"><span :class="['status-dot',d.status!=='online'?'bad':'']" aria-hidden="true"></span><div class="device-main">
@@ -572,6 +601,11 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
         <div v-if="!favorites.length" class="empty">暂无收藏。在短信气泡下方点击 ☆ 即可收藏。</div>
         <div v-for="m in favorites" :key="m.id" class="favorite-row"><button type="button" class="favorite-open" @click="openFavorite(m)"><strong>{{ contactName(m.phone) }}</strong><time>{{ fmt(m.created_at) }}</time><p>{{ m.body }}</p><small>{{ m.phone }} · {{ deviceName(m.device_id) }}</small></button><button type="button" class="favorite-toggle saved" aria-label="取消收藏短信" title="取消收藏" @click="toggleFavorite(m)">★</button></div>
       </section>
+      <section v-else-if="view==='blacklist'" class="blacklist-page">
+        <div class="blacklist-notice">黑名单号码发来的新短信会保存在这里，且不会推送到飞书、钉钉或通用 Webhook。移出黑名单不会删除已归档短信。</div>
+        <div v-if="!blacklist.length" class="empty">黑名单为空。可以从短信会话中加入号码，或点击右上角添加。</div>
+        <div v-for="item in blacklist" :key="item.phone" class="blacklist-card"><div class="blacklist-head"><span class="conversation-avatar blocked">⊘</span><div class="contact-details"><strong>{{ item.label || item.phone }}</strong><p>{{ item.phone }} · {{ item.message_count || 0 }} 条已拦截短信</p><small v-if="item.note">{{ item.note }}</small></div><button class="text-button" type="button" @click="editBlacklist(item.phone)">编辑</button><button class="text-button danger" type="button" @click="deleteBlacklist(item)">移出</button></div><div class="blacklist-messages"><div v-for="m in blacklistedMessages.filter(message => message.phone===item.phone).slice(0,5)" :key="m.id" class="blacklist-message"><p>{{ m.body }}</p><small>{{ fmt(m.created_at) }} · {{ deviceName(m.device_id) }}</small></div><div v-if="!blacklistedMessages.some(message => message.phone===item.phone)" class="list-empty">尚未收到黑名单短信</div></div></div>
+      </section>
       <form v-else class="settings-form" @submit.prevent="saveSettings">
         <fieldset><legend>API 配置</legend><div class="setting-description">保存常用网关连接。备注用于区分环境，Token 只保存在当前浏览器且不会回显。</div><div class="config-list"><div v-for="p in apiProfiles" :key="p.id" class="config-item"><div><strong>{{ p.label }}</strong><p>{{ p.apiBase || '当前地址' }} · Token {{ p.token?'已配置':'未配置' }}</p></div><button type="button" class="text-button" @click="renameApiProfile(p)">改备注</button><button type="button" class="text-button" @click="useApiProfile(p)">使用</button><button type="button" class="text-button danger" @click="deleteApiProfile(p.id)">删除</button></div><div v-if="!apiProfiles.length" class="list-empty">暂无已保存配置</div></div><div class="add-config"><input v-model="apiDraft.label" placeholder="备注，例如：本机网关"><input v-model="apiDraft.apiBase" placeholder="服务地址，留空为当前地址"><input v-model="apiDraft.token" type="password" autocomplete="new-password" placeholder="访问 Token，可留空"><button class="primary" type="button" @click="addApiProfile">保存到列表</button></div><label>刷新间隔<select v-model.number="settings.refresh"><option :value="3">3 秒</option><option :value="5">5 秒</option><option :value="10">10 秒</option><option :value="30">30 秒</option></select></label></fieldset>
         <fieldset><legend>管理员与 API 凭据</legend><div class="setting-description">使用 admin 账号管理分配给其他程序的 API 凭据。每把凭据可单独备注和撤销；密钥只在创建时显示一次。</div>
@@ -590,6 +624,9 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
     </div>
     <div v-if="contactEditorOpen" class="modal-backdrop" @click.self="contactEditorOpen=false">
       <form class="compose contact-form" @submit.prevent="saveContact"><header><h2>{{ contactOriginalPhone?'编辑联系人':'添加联系人' }}</h2><button type="button" class="close" @click="contactEditorOpen=false">关闭</button></header><label>电话号码<input v-model.trim="contactDraft.phone" inputmode="tel" autocomplete="tel" pattern="\+?[0-9]{5,20}" maxlength="21" :readonly="!!contactOriginalPhone" required placeholder="例如：13800138000"></label><label>姓名或显示备注<input v-model.trim="contactDraft.name" maxlength="80" required placeholder="例如：张先生、客服、快递"></label><label>详细备注<textarea v-model="contactDraft.note" maxlength="500" placeholder="公司、用途等补充信息（可选）"></textarea><small>{{ contactDraft.note.length }}/500</small></label><p v-if="contactOriginalPhone" class="hint">电话号码是联系人索引；如需改号码，请新建联系人。</p><div v-if="contactError" class="form-error">{{ contactError }}</div><footer><button type="button" @click="contactEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer></form>
+    </div>
+    <div v-if="blacklistEditorOpen" class="modal-backdrop" @click.self="blacklistEditorOpen=false">
+      <form class="compose contact-form" @submit.prevent="saveBlacklist"><header><h2>{{ blacklistOriginalPhone?'编辑黑名单':'加入黑名单' }}</h2><button type="button" class="close" @click="blacklistEditorOpen=false">关闭</button></header><label>电话号码<input v-model.trim="blacklistDraft.phone" inputmode="tel" autocomplete="tel" pattern="\+?[0-9]{5,20}" maxlength="21" :readonly="!!blacklistOriginalPhone" required placeholder="例如：10086"></label><label>显示备注<input v-model.trim="blacklistDraft.label" maxlength="80" placeholder="例如：广告短信（可选）"></label><label>详细备注<textarea v-model="blacklistDraft.note" maxlength="500" placeholder="加入原因等补充信息（可选）"></textarea><small>{{ blacklistDraft.note.length }}/500</small></label><div class="blacklist-notice compact-notice">加入后，该号码之后收到的短信只存入黑名单，机器人和通用 Webhook 均不推送。</div><div v-if="blacklistError" class="form-error">{{ blacklistError }}</div><footer><button type="button" @click="blacklistEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer></form>
     </div>
   </div>
 </template>
