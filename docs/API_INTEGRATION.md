@@ -88,7 +88,7 @@ SMS_GATEWAY_FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你�
 
 - `PATCH /api/v1/messages/{id}/favorite`：请求体 `{"favorite": true|false}`，收藏或取消收藏单条短信。
 - `GET /api/v1/network/4g`：读取 Air780 数据网卡开关和地址状态。
-- `PUT /api/v1/network/4g`：请求体 `{"enabled": true|false}`，通过宿主机控制服务切换 4G 备用网络。首次安装需运行 `scripts/install-4g-switch.sh`。
+- `PUT /api/v1/network/4g`：请求体 `{"enabled": true|false, "interface": "eth0"}`，通过宿主机控制服务切换指定 Air780 的 4G 备用网络；省略 `interface` 时切换全部。支持 NetworkManager 和 `systemd-networkd`；首次安装需运行 `scripts/install-4g-switch.sh`。
 
 ## 管理员与独立 API 凭据
 

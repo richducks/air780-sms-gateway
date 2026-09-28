@@ -5,6 +5,7 @@ The SMS container talks to this Unix socket. Only the exact AirM2M USB device
 is reconfigured; the host's primary interface and DNS are never changed.
 """
 import json
+import grp
 import os
 import re
 import socketserver
@@ -17,6 +18,7 @@ from pathlib import Path
 SOCKET = Path('/run/air780-4g/control.sock')
 NETWORK = Path('/etc/systemd/network/05-air780-rndis.network')
 MONITOR = Path('/usr/local/libexec/air780-luatos-tools')
+NM_PREFIX = 'air780-4g-'
 signal_cache = {}
 monitor_threads = {}
 
@@ -87,7 +89,34 @@ def interfaces():
     return found
 
 
-def enabled():
+def command_ok(command):
+    return subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          check=False).returncode == 0
+
+
+def network_backend():
+    if command_ok(['systemctl', 'is-active', '--quiet', 'NetworkManager']):
+        return 'NetworkManager'
+    if Path('/run/systemd/netif').exists():
+        return 'systemd-networkd'
+    return None
+
+
+def nm_connection(link):
+    return NM_PREFIX + link
+
+
+def nm_link_enabled(link):
+    result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION',
+                             'device', 'show', link], capture_output=True,
+                            text=True, check=False)
+    return result.returncode == 0 and result.stdout.strip().endswith(nm_connection(link))
+
+
+def enabled(links=None):
+    links = interfaces() if links is None else links
+    if network_backend() == 'NetworkManager':
+        return bool(links) and all(nm_link_enabled(link) for link in links)
     try:
         return 'DHCP=ipv4' in NETWORK.read_text()
     except OSError:
@@ -111,9 +140,12 @@ def interface_ports(link):
 
 def state():
     links = interfaces()
-    return {'available': bool(links), 'enabled': enabled(),
-            'interfaces': [{'name': link, 'addresses': addresses(link),
+    return {'available': bool(links), 'enabled': enabled(links),
+            'interfaces': [{'name': link, 'enabled': (nm_link_enabled(link)
+                            if network_backend() == 'NetworkManager' else enabled(links)),
+                            'addresses': addresses(link),
                             'serial_ports': interface_ports(link)} for link in links],
+            'network_backend': network_backend(),
             'route_policy': '4G 路由优先级低于主网络，不接管 DNS',
             **signal_status()}
 
@@ -130,17 +162,40 @@ def signal_status():
     return {'signal': None, 'signal_supported': False}
 
 
-def set_enabled(value):
-    links = interfaces()
-    if not links:
-        raise ValueError('未检测到 Air780 4G 数据网卡')
-    if len(links) > 1:
-        raise ValueError('检测到多个 4G 网卡；当前开关仅支持单网卡，已避免同时切换多台设备')
-    if not Path('/run/systemd/netif').exists():
-        raise ValueError('systemd-networkd 未运行')
-    current = enabled()
-    if current == value:
-        return state()
+def set_networkmanager(links, value):
+    for link in links:
+        name = nm_connection(link)
+        if value:
+            subprocess.run(['nmcli', 'device', 'set', link, 'managed', 'yes'],
+                           check=True, timeout=15)
+            if not command_ok(['nmcli', 'connection', 'show', name]):
+                subprocess.run(['nmcli', 'connection', 'add', 'type', 'ethernet',
+                                'ifname', link, 'con-name', name], check=True, timeout=15)
+            subprocess.run([
+                'nmcli', 'connection', 'modify', name,
+                'connection.interface-name', link, 'connection.autoconnect', 'no',
+                'ipv4.method', 'auto', 'ipv4.route-metric', '5000',
+                'ipv4.ignore-auto-dns', 'yes', 'ipv4.never-default', 'no',
+                'ipv6.method', 'disabled'
+            ], check=True, timeout=15)
+            subprocess.run(['nmcli', 'device', 'set', link, 'managed', 'yes'],
+                           check=True, timeout=15)
+            subprocess.run(['nmcli', 'connection', 'up', name, 'ifname', link],
+                           check=True, timeout=45)
+        else:
+            subprocess.run(['nmcli', 'connection', 'down', name],
+                           capture_output=True, check=False, timeout=20)
+            subprocess.run(['nmcli', 'device', 'disconnect', link],
+                           capture_output=True, check=False, timeout=20)
+            subprocess.run(['nmcli', 'device', 'set', link, 'managed', 'no'],
+                           check=True, timeout=15)
+            subprocess.run(['ip', 'route', 'del', 'default', 'dev', link],
+                           capture_output=True, check=False)
+            subprocess.run(['resolvectl', 'revert', link],
+                           capture_output=True, check=False)
+
+
+def set_networkd(links, value):
     config = ('[Match]\nDriver=rndis_host\n\n[Network]\n'
               f'DHCP={"ipv4" if value else "no"}\n'
               'IPv6AcceptRA=no\nLinkLocalAddressing=no\n'
@@ -165,6 +220,23 @@ def set_enabled(value):
         for link in links:
             subprocess.run(['networkctl', 'reconfigure', link], check=False)
         raise
+
+
+def set_enabled(value, requested_link=None):
+    links = interfaces()
+    if not links:
+        raise ValueError('未检测到 Air780 4G 数据网卡')
+    if requested_link is not None:
+        if requested_link not in links:
+            raise ValueError('指定的 4G 网卡不存在')
+        links = [requested_link]
+    backend = network_backend()
+    if backend == 'NetworkManager':
+        set_networkmanager(links, value)
+    elif backend == 'systemd-networkd':
+        set_networkd(links, value)
+    else:
+        raise ValueError('未检测到受支持的网络管理器')
     return state()
 
 
@@ -178,7 +250,7 @@ class Handler(socketserver.StreamRequestHandler):
             if request == {'action': 'status'}:
                 result = state()
             elif request.get('action') == 'set' and type(request.get('enabled')) is bool:
-                result = set_enabled(request['enabled'])
+                result = set_enabled(request['enabled'], request.get('interface'))
             else:
                 raise ValueError('invalid request')
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
@@ -190,6 +262,6 @@ if __name__ == '__main__':
     SOCKET.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     threading.Thread(target=monitor_loop, daemon=True, name='air780-signal').start()
     with socketserver.ThreadingUnixStreamServer(str(SOCKET), Handler) as server:
-        os.chown(SOCKET, 0, 10001)
+        os.chown(SOCKET, 0, grp.getgrnam('dialout').gr_gid)
         os.chmod(SOCKET, 0o660)
         server.serve_forever()

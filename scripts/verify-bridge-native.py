@@ -41,6 +41,8 @@ def probe(port: str):
                     frame = json.loads(raw.decode("utf-8", errors="strict"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
+                if not isinstance(frame, dict):
+                    continue
                 if (frame.get("project") == "air780_usb_sms_bridge"
                         and frame.get("type") in ("pong", "ready")):
                     return frame

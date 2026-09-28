@@ -20,3 +20,4 @@ releases/
 firmware/*.soc
 firmware/script/
 *.log
+*.exe

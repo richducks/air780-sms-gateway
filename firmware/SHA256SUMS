@@ -1,0 +1,3 @@
+491abc6bf5be8404d3911b7059e43411b2073de133beb06099af741646edcb20  air780_usb_sms_bridge.soc
+e0f80edb03c6fc35582dbe5410fabd609a2622be8ca57f4b2db2feafc218f9b0  bridge/main.lua
+9f2308c0577a8b0da425a02cd76cfc387603d1ea0e34af6b3bd319b3a8b9b690  ../tools/LuatOS-SoC_V2044_Air780EPM_106.soc

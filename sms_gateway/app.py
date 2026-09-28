@@ -534,8 +534,12 @@ def handler_factory(gateway: Gateway):
                     payload = self._payload()
                     if type(payload.get('enabled')) is not bool:
                         raise ValueError('enabled must be a boolean')
+                    interface = payload.get('interface')
+                    if interface is not None and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,64}', str(interface)):
+                        raise ValueError('interface is invalid')
                     self._json(HTTPStatus.OK, gateway.four_g({
-                        'action': 'set', 'enabled': payload['enabled']}))
+                        'action': 'set', 'enabled': payload['enabled'],
+                        'interface': interface}))
                 except (ValueError, json.JSONDecodeError, AttributeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return

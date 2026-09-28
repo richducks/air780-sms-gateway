@@ -14,7 +14,7 @@ Docker 镜像包含 Vue 3 管理页面、Python 多设备网关、SQLite 存储�
 
 Air780 除串口外还会暴露 RNDIS 数据网卡。如果不隔离，NetworkManager 可能为它获取 DHCP、默认路由和 DNS，使服务器原有有线/Wi-Fi网络或代理失效。保护方案按 USB ID `19d1:0001` 和 `rndis_host` 驱动识别，不依赖当前机器的 `enx...` 网卡名，换 USB 口和接入多台设备仍然有效。
 
-如需在网页“设备”中手动开启 4G 备用网络，在使用 `systemd-networkd` 的宿主机上执行 `./scripts/install-4g-switch.sh`，然后重新运行 `docker compose up -d`。开关默认关闭；开启后 Air780 数据网卡使用 DHCP，但路由 metric 为 5000，不接管 DNS，原有主网络优先。关闭后恢复无 DHCP 的隔离配置。该开关由宿主机上的受限 Unix socket 服务执行，容器不能直接修改宿主机网络配置。
+如需在网页“设备”中手动开启 4G 备用网络，在使用 NetworkManager 或 `systemd-networkd` 的宿主机上执行 `./scripts/install-4g-switch.sh`，然后重新运行 `docker compose up -d`。开关默认关闭；使用 NetworkManager 时可独立控制每台 Air780 的数据网卡。开启后使用 DHCP，但路由优先级低于主网络，并且不接管 DNS；关闭后恢复无 DHCP 的隔离配置。该开关由宿主机上的受限 Unix socket 服务执行，容器不能直接修改宿主机网络配置。
 
 4G 信号格优先使用宿主机上的 LuatOS 只读监测工具从模块日志口取得 CSQ（0–31）。若安装包中没有监测工具，`install-4g-switch.sh` 会保留开关功能，但页面会显示“正在读取模块信号”。短信桥固件 v1.2.1 会在飞行模式下配置模块的 USB RNDIS NAT 数据共享，否则主机网卡可能出现“等待获取地址”；该固件也可直接上报 RSRP/CSQ。固件升级需在设备旁按 BOOT/RESET，见 `scripts/flash-device.sh` 和 `REPEATABLE_DEPLOYMENT.md`。升级固件不会自动开启宿主机的 4G 数据开关；有线网络仍为优先出口。
 

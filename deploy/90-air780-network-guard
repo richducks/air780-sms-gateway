@@ -1,8 +1,11 @@
 #!/bin/sh
 interface=$1
 action=$2
+[ "${CONNECTION_ID:-}" != "${CONNECTION_ID#air780-4g-}" ] && exit 0
+active_connection=$(nmcli -g GENERAL.CONNECTION device show "$interface" 2>/dev/null || true)
+[ "${active_connection:-}" != "${active_connection#air780-4g-}" ] && exit 0
 case "$action" in
-  up|dhcp4-change|dhcp6-change|connectivity-change) ;;
+  up|dhcp4-change|dhcp6-change) ;;
   *) exit 0 ;;
 esac
 device_path=$(readlink -f "/sys/class/net/$interface/device" 2>/dev/null) || exit 0

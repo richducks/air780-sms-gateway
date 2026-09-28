@@ -16,7 +16,7 @@ cp .env.docker.example .env.docker
 ./scripts/docker-deploy.sh
 ```
 
-打开 `http://服务器IP:8787/`，在设置页填入 `.env.docker` 中的 API Token。服务使用 SQLite 保存短信、联系人及配置，Docker 卷用于持久化。备份方法见部署说明。
+打开 `http://服务器IP:8787/`，在设置页填入 `.env.docker` 中的 API Token。管理员初始用户名和密码均为 `admin`；首次登录后请立即在设置页改为独立的强密码。服务使用 SQLite 保存短信、联系人及配置，Docker 卷用于持久化。备份方法见部署说明。
 
 **请勿将 `.env`、`.env.docker`、短信数据库、真实手机号或机器人 Hook 提交到 GitHub。** 默认 Compose 使用 `privileged: true` 支持 USB 热插拔，只适合可信的专用主机；固定设备可按部署文档缩小权限。公网使用时应通过 HTTPS 反向代理或 VPN 访问。
 

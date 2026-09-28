@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 const view = ref('messages')
 const navIds = ['messages','devices','contacts','favorites','blacklist','settings']
 const navLabels = {messages:'短信',devices:'设备',contacts:'通讯录',favorites:'收藏',blacklist:'黑名单',settings:'设置'}
+const navDescriptions = {messages:'查看和发送短信',devices:'管理短信设备和 4G 网络',contacts:'号码与备注',favorites:'保存的重要短信',blacklist:'拦截与归档',settings:'连接与界面偏好'}
 const savedNavOrder = JSON.parse(localStorage.getItem('sms.navOrder') || '[]')
 const navOrder = ref([...savedNavOrder.filter(id => navIds.includes(id)), ...navIds.filter(id => !savedNavOrder.includes(id))])
 const navDragging = ref('')
@@ -100,7 +101,7 @@ const blacklistedMessages = computed(() => messages.value.filter(m => m.blacklis
 const contactByPhone = phone => contacts.value.find(c => c.phone === phone) || null
 const contactName = phone => contactByPhone(phone)?.name || phone
 const contactAvatar = phone => (contactByPhone(phone)?.name || phone || '?').slice(0, 2)
-const deviceNetworkConnected = device => !!(fourG.value.enabled && networkForDevice(device)?.addresses?.length)
+const deviceNetworkConnected = device => !!(networkForDevice(device)?.enabled && networkForDevice(device)?.addresses?.length)
 const deviceSignalBars = device => {
   if (device.status !== 'online') return null
   const rsrp = device.signal?.rsrp
@@ -117,7 +118,7 @@ const deviceSignalLabel = device => {
   const rsrp = device.signal?.rsrp
   return typeof rsrp === 'number' && rsrp < 0 ? `蜂窝信号 ${rsrp} dBm` : `蜂窝信号 CSQ ${device.signal.csq}/31`
 }
-const deviceDataLabel = device => !networkForDevice(device) ? '无 4G 网卡' : !fourG.value.enabled ? '4G 已关闭' : deviceNetworkConnected(device) ? '4G 已连接' : '4G 未连接'
+const deviceDataLabel = device => !networkForDevice(device) ? '无 4G 网卡' : !networkForDevice(device).enabled ? '4G 已关闭' : deviceNetworkConnected(device) ? '4G 已连接' : '4G 未连接'
 
 function dropNav(target, event) {
   event.preventDefault()
@@ -179,12 +180,14 @@ function openFavorite(message) {
   selectConversation(conversationKey(message))
   nextTick(() => document.querySelector(`[data-message-id="${message.id}"]`)?.scrollIntoView({block:'center'}))
 }
-async function toggleFourG() {
+async function toggleFourG(device) {
+  const network = networkForDevice(device)
+  if (!network) return
   fourGBusy.value = true
   fourGError.value = ''
   try {
     fourG.value = await api('/api/v1/network/4g', {
-      method:'PUT', body:JSON.stringify({enabled:!fourG.value.enabled})
+      method:'PUT', body:JSON.stringify({enabled:!network.enabled, interface:network.name})
     })
   } catch (exc) { fourGError.value = exc.message }
   finally { fourGBusy.value = false }
@@ -247,15 +250,17 @@ function scrollChatToBottom() {
   nextTick(() => { if (chatHistory.value) chatHistory.value.scrollTop = 0 })
 }
 function selectConversation(key) {
+  composeOpen.value = false
   selectedConversationKey.value = key
   mobileConversationOpen.value = true
   chatError.value = ''
   scrollChatToBottom()
 }
 function openNewMessage() {
-  draft.value = {device_id:'', phone:'', body:''}
+  draft.value = {device_id:deviceFilter.value === 'all' ? '' : deviceFilter.value, phone:'', body:''}
   error.value = ''
   composeOpen.value = true
+  mobileConversationOpen.value = true
 }
 function editContact(phone = '') {
   const contact = contactByPhone(phone)
@@ -535,7 +540,7 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
           <svg v-else-if="id==='favorites'" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 3.1 6.4 7.1 1-5.1 5 .9 7-6-3.3-6 3.3.9-7-5.1-5 7.1-1z"/></svg>
           <svg v-else-if="id==='blacklist'" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6 18 12-12"/></svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 2.9h3.4l.5 2.1c.6.2 1.2.4 1.7.7l1.9-1.1 2.4 2.4-1.1 1.9c.3.5.5 1.1.7 1.7l2.1.5v3.4l-2.1.5c-.2.6-.4 1.2-.7 1.7l1.1 1.9-2.4 2.4-1.9-1.1c-.5.3-1.1.5-1.7.7l-.5 2.1h-3.4l-.5-2.1c-.6-.2-1.2-.4-1.7-.7l-1.9 1.1-2.4-2.4 1.1-1.9c-.3-.5-.5-1.1-.7-1.7l-2.1-.5v-3.4l2.1-.5c.2-.6.4-1.2.7-1.7L3.8 7l2.4-2.4 1.9 1.1c.5-.3 1.1-.5 1.7-.7z"/><circle cx="12" cy="12.8" r="3.1"/></svg>
-          <span>{{ navLabels[id] }}</span><b v-if="id==='messages'">{{ messages.length-blacklistedMessages.length }}</b><i v-else-if="id==='devices'" :class="onlineCount?'ok':''">{{ onlineCount }}</i><i v-else-if="id==='contacts'">{{ contacts.length }}</i><i v-else-if="id==='favorites'">{{ favorites.length }}</i><i v-else-if="id==='blacklist'">{{ blacklistedMessages.length }}</i><span class="nav-grip" aria-hidden="true">⋮⋮</span>
+          <span class="nav-copy"><span>{{ navLabels[id] }}</span><small v-if="view===id">{{ navDescriptions[id] }}</small></span><b v-if="id==='messages'">{{ messages.length-blacklistedMessages.length }}</b><i v-else-if="id==='devices'" :class="onlineCount?'ok':''">{{ onlineCount }}</i><i v-else-if="id==='contacts'">{{ contacts.length }}</i><i v-else-if="id==='favorites'">{{ favorites.length }}</i><i v-else-if="id==='blacklist'">{{ blacklistedMessages.length }}</i><span class="nav-grip" aria-hidden="true">⋮⋮</span>
         </button>
       </nav>
       <div class="sidebar-foot">
@@ -550,21 +555,32 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
     </main>
     <template v-else-if="view==='messages'">
       <section class="list-pane">
-        <header class="pane-head"><div><h1>会话</h1><p>{{ onlineCount }} 台设备在线</p></div><button class="primary compact" @click="openNewMessage">新短信</button></header>
         <div class="device-filters" aria-label="按设备筛选">
           <button :class="{active:deviceFilter==='all'}" @click="deviceFilter='all'">全部</button>
           <button v-for="d in devices" :key="d.device_id" :class="{active:deviceFilter===d.device_id}" @click="deviceFilter=d.device_id">{{ d.label || '未备注设备' }}</button>
         </div>
         <div class="message-list conversation-list">
+          <button v-if="composeOpen" type="button" class="conversation-row selected draft-conversation-row" @click="mobileConversationOpen=true">
+            <span class="conversation-avatar">＋</span><span class="conversation-summary"><span class="row-top"><strong>{{ draft.phone || '新短信' }}</strong><time>草稿</time></span></span>
+          </button>
           <button v-for="c in visibleConversations" :key="c.key" class="conversation-row" :class="{selected:c.key===selectedConversationKey}" @click="selectConversation(c.key)">
             <span class="conversation-avatar">{{ contactAvatar(c.phone) }}</span>
             <span class="conversation-summary"><span class="row-top"><strong>{{ contactName(c.phone) }}</strong><time>{{ fmt(c.latest.created_at) }}</time></span><span class="conversation-preview">{{ c.latest.direction==='outbound'?'我：':'' }}{{ c.latest.body }}</span><span class="conversation-device">{{ contactByPhone(c.phone) ? `${c.phone} · ` : '' }}{{ deviceName(c.device_id) }}</span></span>
           </button>
-          <div v-if="!visibleConversations.length" class="empty">暂无会话</div>
+          <div v-if="!visibleConversations.length && !composeOpen" class="empty">暂无会话</div>
         </div>
+        <button v-if="!composeOpen" type="button" class="new-message-fab" aria-label="新短信" title="新短信" @click="openNewMessage">＋</button>
       </section>
       <main class="detail-pane chat-pane">
-        <template v-if="activeConversation">
+        <template v-if="composeOpen">
+          <form class="new-chat" @submit.prevent="send">
+            <header class="chat-header new-chat-header"><button type="button" class="chat-back" aria-label="返回会话列表" @click="mobileConversationOpen=false">‹</button><span class="conversation-avatar">＋</span><span class="new-recipient"><strong>新短信</strong><input v-model.trim="draft.phone" inputmode="tel" list="contact-numbers" required autofocus placeholder="输入手机号码或选择联系人" aria-label="手机号码"><small v-if="contactByPhone(draft.phone)">{{ contactName(draft.phone) }}</small></span><label class="new-device-select"><span>发送设备</span><select v-model="draft.device_id"><option value="">自动选择</option><option v-for="d in devices" :key="d.device_id" :value="d.device_id">{{ d.label || d.imei }}{{ d.status==='online'?'':'（离线）' }}</option></select></label><button type="button" class="contact-edit" @click="composeOpen=false;mobileConversationOpen=false">取消</button></header>
+            <datalist id="contact-numbers"><option v-for="contact in contacts" :key="contact.phone" :value="contact.phone" :label="contact.name"/></datalist>
+            <div class="chat-history new-chat-empty"><p>填写收件号码和短信内容后发送</p></div>
+            <div class="chat-compose"><div v-if="draft.device_id && !devices.some(d=>d.device_id===draft.device_id && d.status==='online')" class="chat-warning">该设备当前离线，请等待上线或选择其他在线设备。</div><div v-if="error" class="chat-warning">{{ error }}</div><div class="chat-compose-row"><textarea v-model="draft.body" maxlength="134" rows="2" required placeholder="输入短信…" aria-label="短信内容"></textarea><button class="chat-send" type="submit" aria-label="发送短信" :disabled="!draft.phone.trim() || !draft.body.trim() || (!!draft.device_id && !devices.some(d=>d.device_id===draft.device_id && d.status==='online'))">➤</button></div><small><span class="desktop-send-hint">填写完成后发送 · </span>{{ draft.body.length }}/134</small></div>
+          </form>
+        </template>
+        <template v-else-if="activeConversation">
           <header class="chat-header"><button type="button" class="chat-back" aria-label="返回会话列表" @click="mobileConversationOpen=false">‹</button><span class="conversation-avatar">{{ contactAvatar(activeConversation.phone) }}</span><span class="chat-contact"><strong>{{ contactName(activeConversation.phone) }}</strong><small>{{ activeConversation.phone }} · {{ deviceName(activeConversation.device_id) }} · {{ activeDeviceOnline?'设备在线':'设备离线' }}</small></span><button type="button" class="contact-edit danger" @click="editBlacklist(activeConversation.phone)">加入黑名单</button><button type="button" class="contact-edit" @click="editContact(activeConversation.phone)">{{ contactByPhone(activeConversation.phone)?'编辑资料':'存为联系人' }}</button></header>
           <div ref="chatHistory" class="chat-history" role="log" aria-label="短信对话记录">
             <div v-for="m in conversationMessages" :key="m.id" :data-message-id="m.id" class="chat-line" :class="m.direction==='outbound'?'outbound':'inbound'">
@@ -578,7 +594,6 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
     </template>
 
     <main v-else class="page-pane">
-      <header class="page-head"><div><h1>{{ view==='devices'?'设备':view==='contacts'?'通讯录':view==='favorites'?'收藏':view==='blacklist'?'黑名单':'设置' }}</h1><p>{{ view==='devices'?'管理短信设备和 4G 网络':view==='contacts'?'给号码添加姓名和备注，方便识别短信来源':view==='favorites'?'保存重要短信，随时返回原会话':view==='blacklist'?'拦截指定号码的机器人通知，并单独保存收到的短信':'连接与界面偏好' }}</p></div><button v-if="view==='contacts'" class="primary compact" type="button" @click="editContact()">添加联系人</button><button v-else-if="view==='blacklist'" class="primary compact" type="button" @click="editBlacklist()">添加号码</button></header>
       <section v-if="view==='devices'" class="device-table" aria-label="设备列表">
         <div v-for="d in devices" :key="d.device_id" class="device-line">
           <div class="device-identity"><span :class="['status-dot',d.status!=='online'?'bad':'']" aria-hidden="true"></span><div class="device-main">
@@ -589,13 +604,14 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
             <span class="phone-status large" :aria-label="`${deviceSignalLabel(d)}，${deviceDataLabel(d)}`"><span class="signal-bars large" :class="{on:deviceSignalBars(d)>0}" aria-hidden="true"><i v-for="bar in 4" :key="bar" :class="{active:deviceSignalBars(d)!==null && bar<=deviceSignalBars(d)}"></i></span><span class="network-mark" :class="{connected:deviceNetworkConnected(d)}" aria-hidden="true">4G</span></span>
             <div><strong>{{ deviceDataLabel(d) }}</strong><p>{{ deviceSignalLabel(d) }}</p><p v-if="networkForDevice(d)">{{ networkForDevice(d).addresses?.join(', ') || '等待获取地址' }}</p></div>
           </div>
-          <div class="device-actions"><span :class="['device-status',d.status!=='online'?'offline':'']">{{ d.status==='online'?'在线':'离线' }}</span><button v-if="editingDevice!==d.device_id" class="text-button" type="button" @click="beginRename(d)">{{ d.label?'修改备注':'添加备注' }}</button><button v-if="networkForDevice(d)" type="button" class="primary compact" :disabled="!fourG.available || fourGBusy || fourG.interfaces?.length!==1" :title="fourG.interfaces?.length!==1?'当前仅支持单个 4G 网卡独立切换':''" @click="toggleFourG">{{ fourGBusy?'切换中…':fourG.enabled?'关闭 4G':'开启 4G' }}</button></div>
+          <div class="device-actions"><span :class="['device-status',d.status!=='online'?'offline':'']">{{ d.status==='online'?'在线':'离线' }}</span><button v-if="editingDevice!==d.device_id" class="text-button" type="button" @click="beginRename(d)">{{ d.label?'修改备注':'添加备注' }}</button><button v-if="networkForDevice(d)" type="button" class="primary compact" :disabled="!fourG.available || fourGBusy" @click="toggleFourG(d)">{{ fourGBusy?'切换中…':networkForDevice(d).enabled?'关闭 4G':'开启 4G' }}</button></div>
         </div>
         <p v-if="!devices.length" class="empty">暂无设备</p><p v-if="fourGError" class="form-error">{{ fourGError }}</p>
       </section>
       <section v-else-if="view==='contacts'" class="contacts-page">
-        <div v-if="!contacts.length" class="empty">暂无联系人。可从会话中保存号码，或点击右上角添加。</div>
+        <div v-if="!contacts.length" class="empty">暂无联系人</div>
         <div v-for="contact in contacts" :key="contact.phone" class="contact-row"><span class="conversation-avatar">{{ contact.name.slice(0,2) }}</span><div class="contact-details"><strong>{{ contact.name }}</strong><p>{{ contact.phone }}</p><small v-if="contact.note">{{ contact.note }}</small></div><button class="text-button" type="button" @click="editContact(contact.phone)">编辑</button><button class="text-button danger" type="button" @click="deleteContact(contact)">删除</button></div>
+        <button class="page-add-fab" type="button" aria-label="添加联系人" title="添加联系人" @click="editContact()">＋</button>
       </section>
       <section v-else-if="view==='favorites'" class="favorites-page">
         <div v-if="!favorites.length" class="empty">暂无收藏。在短信气泡下方点击 ☆ 即可收藏。</div>
@@ -603,8 +619,9 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
       </section>
       <section v-else-if="view==='blacklist'" class="blacklist-page">
         <div class="blacklist-notice">黑名单号码发来的新短信会保存在这里，且不会推送到飞书、钉钉或通用 Webhook。移出黑名单不会删除已归档短信。</div>
-        <div v-if="!blacklist.length" class="empty">黑名单为空。可以从短信会话中加入号码，或点击右上角添加。</div>
+        <div v-if="!blacklist.length" class="empty">黑名单为空</div>
         <div v-for="item in blacklist" :key="item.phone" class="blacklist-card"><div class="blacklist-head"><span class="conversation-avatar blocked">⊘</span><div class="contact-details"><strong>{{ item.label || item.phone }}</strong><p>{{ item.phone }} · {{ item.message_count || 0 }} 条已拦截短信</p><small v-if="item.note">{{ item.note }}</small></div><button class="text-button" type="button" @click="editBlacklist(item.phone)">编辑</button><button class="text-button danger" type="button" @click="deleteBlacklist(item)">移出</button></div><div class="blacklist-messages"><div v-for="m in blacklistedMessages.filter(message => message.phone===item.phone).slice(0,5)" :key="m.id" class="blacklist-message"><p>{{ m.body }}</p><small>{{ fmt(m.created_at) }} · {{ deviceName(m.device_id) }}</small></div><div v-if="!blacklistedMessages.some(message => message.phone===item.phone)" class="list-empty">尚未收到黑名单短信</div></div></div>
+        <button class="page-add-fab" type="button" aria-label="添加黑名单号码" title="添加号码" @click="editBlacklist()">＋</button>
       </section>
       <form v-else class="settings-form" @submit.prevent="saveSettings">
         <fieldset><legend>API 配置</legend><div class="setting-description">保存常用网关连接。备注用于区分环境，Token 只保存在当前浏览器且不会回显。</div><div class="config-list"><div v-for="p in apiProfiles" :key="p.id" class="config-item"><div><strong>{{ p.label }}</strong><p>{{ p.apiBase || '当前地址' }} · Token {{ p.token?'已配置':'未配置' }}</p></div><button type="button" class="text-button" @click="renameApiProfile(p)">改备注</button><button type="button" class="text-button" @click="useApiProfile(p)">使用</button><button type="button" class="text-button danger" @click="deleteApiProfile(p.id)">删除</button></div><div v-if="!apiProfiles.length" class="list-empty">暂无已保存配置</div></div><div class="add-config"><input v-model="apiDraft.label" placeholder="备注，例如：本机网关"><input v-model="apiDraft.apiBase" placeholder="服务地址，留空为当前地址"><input v-model="apiDraft.token" type="password" autocomplete="new-password" placeholder="访问 Token，可留空"><button class="primary" type="button" @click="addApiProfile">保存到列表</button></div><label>刷新间隔<select v-model.number="settings.refresh"><option :value="3">3 秒</option><option :value="5">5 秒</option><option :value="10">10 秒</option><option :value="30">30 秒</option></select></label></fieldset>
@@ -619,9 +636,6 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
       </form>
     </main>
 
-    <div v-if="composeOpen" class="modal-backdrop" @click.self="composeOpen=false">
-      <form class="compose" @submit.prevent="send"><header><h2>新短信</h2><button type="button" class="close" @click="composeOpen=false">关闭</button></header><label>发送设备<select v-model="draft.device_id"><option value="">自动选择</option><option v-for="d in devices" :key="d.device_id" :value="d.device_id">{{ d.label || d.imei }}{{ d.status==='online'?'':'（离线）' }}</option></select></label><p v-if="draft.device_id && !devices.some(d=>d.device_id===draft.device_id && d.status==='online')" class="form-error">该设备当前离线，请等待上线或选择其他在线设备。</p><label>手机号码<input v-model.trim="draft.phone" inputmode="tel" list="contact-numbers" required placeholder="输入号码或选择联系人"></label><datalist id="contact-numbers"><option v-for="contact in contacts" :key="contact.phone" :value="contact.phone" :label="contact.name"/></datalist><p v-if="contactByPhone(draft.phone)" class="recipient-hint">{{ contactName(draft.phone) }}</p><label>短信内容<textarea v-model="draft.body" maxlength="134" required placeholder="输入短信内容"></textarea><small>{{ draft.body.length }}/134</small></label><div v-if="error" class="form-error">{{ error }}</div><footer><button type="button" @click="composeOpen=false">取消</button><button class="primary" type="submit" :disabled="!!draft.device_id && !devices.some(d=>d.device_id===draft.device_id && d.status==='online')">发送</button></footer></form>
-    </div>
     <div v-if="contactEditorOpen" class="modal-backdrop" @click.self="contactEditorOpen=false">
       <form class="compose contact-form" @submit.prevent="saveContact"><header><h2>{{ contactOriginalPhone?'编辑联系人':'添加联系人' }}</h2><button type="button" class="close" @click="contactEditorOpen=false">关闭</button></header><label>电话号码<input v-model.trim="contactDraft.phone" inputmode="tel" autocomplete="tel" pattern="\+?[0-9]{5,20}" maxlength="21" :readonly="!!contactOriginalPhone" required placeholder="例如：13800138000"></label><label>姓名或显示备注<input v-model.trim="contactDraft.name" maxlength="80" required placeholder="例如：张先生、客服、快递"></label><label>详细备注<textarea v-model="contactDraft.note" maxlength="500" placeholder="公司、用途等补充信息（可选）"></textarea><small>{{ contactDraft.note.length }}/500</small></label><p v-if="contactOriginalPhone" class="hint">电话号码是联系人索引；如需改号码，请新建联系人。</p><div v-if="contactError" class="form-error">{{ contactError }}</div><footer><button type="button" @click="contactEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer></form>
     </div>
