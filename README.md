@@ -1,6 +1,8 @@
 # Air780 USB 短信网关
 
-Air780 / YN076 USB 模块的自托管短信网关。设备端使用 LuatOS 短信接口和 USB VUART 与 Python 服务通信；服务通过 Vue 网页和 HTTP API 管理短信。支持多设备、会话式回复、通讯录、收藏、设备备注、管理员分配 API 凭据、飞书与钉钉机器人，以及可手动开启的 4G 备用数据网络。
+Air780 / YN076 USB 模块的自托管短信网关。设备端使用 LuatOS 短信接口和 USB VUART 与 Python 服务通信；服务通过 Vue 网页和 HTTP API 管理短信。支持多设备、会话式回复、通讯录、收藏、黑名单、设备备注、管理员分配 API 凭据、飞书与钉钉机器人，以及可手动开启的 4G 备用数据网络。
+
+黑名单号码发来的新短信会单独归档，不出现在普通会话中，也不会发送到飞书、钉钉或通用 Webhook。移出黑名单后，已经归档的历史短信仍保留。
 
 ## 快速部署
 
@@ -20,7 +22,7 @@ cp .env.docker.example .env.docker
 
 ## 固件与硬件
 
-本仓库提供 `firmware/bridge/main.lua` 桥接脚本，不分发第三方 LuatOS Core、烧录工具或包含 Core 的 `.soc` 固件。请从合宙官方渠道获取与 Air780EPM 匹配的 Core 和烧录工具，并按 [设备烧录说明](docs/REPEATABLE_DEPLOYMENT.md) 构建和烧录。烧录需要接触设备的 BOOT/RESET 按键。4G 开关默认关闭；即使关闭数据网络，蜂窝信号仍独立显示。有线网络保持优先，4G 不接管 DNS。
+本仓库提供 `firmware/bridge/main.lua` 桥接脚本，不再分发第三方 LuatOS Core、烧录工具或包含 Core 的 `.soc` 固件。请从合宙官方渠道获取与 Air780EPM 匹配的 Core 和烧录工具，并按 [设备烧录说明](docs/REPEATABLE_DEPLOYMENT.md) 构建和烧录。烧录需要接触设备的 BOOT/RESET 按键。4G 开关默认关闭；即使关闭数据网络，蜂窝信号仍应独立显示。有线网络保持优先，4G 不接管 DNS。
 
 ## API 与开发
 
