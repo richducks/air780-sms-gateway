@@ -24,7 +24,7 @@ refresh();setInterval(refresh,5000);
 def openapi_document(base_url: str = "http://127.0.0.1:8787") -> dict:
     return {
         "openapi": "3.0.3",
-        "info": {"title": "Air780 SMS Gateway API", "version": "2.0.0"},
+        "info": {"title": "Air780 SMS Gateway API", "version": "2.1.0"},
         "servers": [{"url": base_url}],
         "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
         "security": [{"bearerAuth": []}],
@@ -36,6 +36,11 @@ def openapi_document(base_url: str = "http://127.0.0.1:8787") -> dict:
                 "get": {"summary": "统一收件箱", "parameters": [{"in": "query", "name": "direction", "schema": {"type": "string", "enum": ["inbound", "outbound"]}}, {"in": "query", "name": "device_id", "schema": {"type": "string"}}, {"in": "query", "name": "limit", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "短信列表"}}},
                 "post": {"summary": "指定设备发送短信", "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "required": ["phone", "body"], "properties": {"device_id": {"type": "string"}, "phone": {"type": "string"}, "body": {"type": "string", "maxLength": 134}}}}}}, "responses": {"202": {"description": "已进入发送队列"}}}
             },
-            "/api/v1/messages/{id}": {"get": {"summary": "查询发送状态", "parameters": [{"in": "path", "name": "id", "required": True, "schema": {"type": "integer"}}], "responses": {"200": {"description": "短信详情"}}}}
+            "/api/v1/messages/{id}": {"get": {"summary": "查询发送状态", "parameters": [{"in": "path", "name": "id", "required": True, "schema": {"type": "integer"}}], "responses": {"200": {"description": "短信详情"}}}},
+            "/api/v1/blacklist": {"get": {"summary": "列出黑名单", "responses": {"200": {"description": "黑名单列表"}}}},
+            "/api/v1/blacklist/{phone}": {
+                "put": {"summary": "加入或更新黑名单", "parameters": [{"in": "path", "name": "phone", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已保存"}}},
+                "delete": {"summary": "移出黑名单", "parameters": [{"in": "path", "name": "phone", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已移出"}}}
+            }
         }
     }
