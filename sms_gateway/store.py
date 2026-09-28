@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,8 +22,17 @@ class MessageStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +75,8 @@ class MessageStore:
                 conn.execute("DROP TABLE messages_legacy")
             if "favorite" not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            if "blacklisted" not in columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN blacklisted INTEGER NOT NULL DEFAULT 0")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS devices (
                     device_id TEXT PRIMARY KEY,
@@ -94,12 +106,21 @@ class MessageStore:
                     updated_at TEXT NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS blacklist (
+                    phone TEXT PRIMARY KEY,
+                    label TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
 
     def create(self, direction: str, phone: str, body: str, status: str,
                modem_index: int | None = None, error: str | None = None,
-               device_id: str | None = None) -> int:
+               device_id: str | None = None, blacklisted: bool = False) -> int:
         now = utc_now()
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             if modem_index is not None:
                 existing = conn.execute(
                     "SELECT id FROM messages WHERE direction=? AND modem_index=? AND device_id IS ?",
@@ -108,8 +129,9 @@ class MessageStore:
                 if existing:
                     return int(existing["id"])
             cur = conn.execute(
-                "INSERT OR IGNORE INTO messages(direction,phone,body,status,modem_index,error,created_at,updated_at,device_id) VALUES(?,?,?,?,?,?,?,?,?)",
-                (direction, phone, body, status, modem_index, error, now, now, device_id),
+                "INSERT OR IGNORE INTO messages(direction,phone,body,status,modem_index,error,created_at,updated_at,device_id,blacklisted) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (direction, phone, body, status, modem_index, error, now, now, device_id,
+                 int(blacklisted)),
             )
             if cur.lastrowid:
                 return int(cur.lastrowid)
@@ -118,20 +140,20 @@ class MessageStore:
             return int(row["id"])
 
     def update(self, message_id: int, status: str, error: str | None = None) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute(
                 "UPDATE messages SET status=?,error=?,updated_at=? WHERE id=?",
                 (status, error, utc_now(), message_id),
             )
 
     def set_favorite(self, message_id: int, favorite: bool) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute("UPDATE messages SET favorite=? WHERE id=?", (int(favorite), message_id))
             row = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         return dict(row) if row else None
 
     def get(self, message_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
             return dict(row) if row else None
 
@@ -150,14 +172,14 @@ class MessageStore:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY id DESC LIMIT ?"
         values.append(limit)
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute(sql, values).fetchall()
         return [dict(row) for row in rows]
 
     def upsert_device(self, device_id: str, imei: str, status: str, serial_port: str | None,
                       firmware_version: str = "", error: str | None = None) -> None:
         now = utc_now()
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute("""
                 INSERT INTO devices(device_id,imei,firmware_version,serial_port,status,last_error,first_seen_at,last_seen_at)
                 VALUES(?,?,?,?,?,?,?,?)
@@ -168,28 +190,28 @@ class MessageStore:
             """, (device_id, imei, firmware_version, serial_port, status, error, now, now))
 
     def update_device_label(self, device_id: str, label: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             cur = conn.execute("UPDATE devices SET label=? WHERE device_id=?", (label, device_id))
             return cur.rowcount > 0
 
     def mark_all_devices_offline(self) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute("UPDATE devices SET status='offline',serial_port=NULL "
                          "WHERE status='online'")
 
     def list_devices(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute("SELECT * FROM devices ORDER BY first_seen_at").fetchall()
         return [dict(row) for row in rows]
 
     def list_contacts(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             rows = conn.execute("SELECT * FROM contacts ORDER BY name COLLATE NOCASE, phone").fetchall()
         return [dict(row) for row in rows]
 
     def upsert_contact(self, phone: str, name: str, note: str = "") -> dict[str, Any]:
         now = utc_now()
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute("""
                 INSERT INTO contacts(phone,name,note,created_at,updated_at) VALUES(?,?,?,?,?)
                 ON CONFLICT(phone) DO UPDATE SET
@@ -199,17 +221,46 @@ class MessageStore:
         return dict(row)
 
     def delete_contact(self, phone: str) -> bool:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             cur = conn.execute("DELETE FROM contacts WHERE phone=?", (phone,))
             return cur.rowcount > 0
 
+    def is_blacklisted(self, phone: str) -> bool:
+        with self._connection() as conn:
+            return conn.execute("SELECT 1 FROM blacklist WHERE phone=?", (phone,)).fetchone() is not None
+
+    def list_blacklist(self) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT b.*, COUNT(m.id) AS message_count, MAX(m.created_at) AS last_message_at "
+                "FROM blacklist b LEFT JOIN messages m ON m.phone=b.phone AND m.blacklisted=1 "
+                "GROUP BY b.phone ORDER BY COALESCE(MAX(m.created_at), b.updated_at) DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_blacklist(self, phone: str, label: str = "", note: str = "") -> dict[str, Any]:
+        now = utc_now()
+        with self._lock, self._connection() as conn:
+            conn.execute("""
+                INSERT INTO blacklist(phone,label,note,created_at,updated_at) VALUES(?,?,?,?,?)
+                ON CONFLICT(phone) DO UPDATE SET
+                    label=excluded.label,note=excluded.note,updated_at=excluded.updated_at
+            """, (phone, label, note, now, now))
+            row = conn.execute("SELECT * FROM blacklist WHERE phone=?", (phone,)).fetchone()
+        return dict(row)
+
+    def delete_blacklist(self, phone: str) -> bool:
+        with self._lock, self._connection() as conn:
+            cur = conn.execute("DELETE FROM blacklist WHERE phone=?", (phone,))
+            return cur.rowcount > 0
+
     def get_setting(self, key: str) -> str | None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
         return str(row["value"]) if row else None
 
     def set_setting(self, key: str, value: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, self._connection() as conn:
             conn.execute("""
                 INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
