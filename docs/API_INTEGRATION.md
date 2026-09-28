@@ -27,6 +27,9 @@ OpenAPI 描述位于 `GET /api/v1/openapi.json`，可直接导入 Postman、Apif
 - `GET /api/v1/contacts`：读取网关通讯录。
 - `PUT /api/v1/contacts/{phone}`：以号码为索引保存姓名和详细备注，JSON 字段为 `name`、`note`。
 - `DELETE /api/v1/contacts/{phone}`：删除联系人资料；历史短信保留。
+- `GET /api/v1/blacklist`：读取黑名单及每个号码的已归档短信数量。
+- `PUT /api/v1/blacklist/{phone}`：加入或更新黑名单号码，JSON 字段为可选的 `label`、`note`。
+- `DELETE /api/v1/blacklist/{phone}`：移出黑名单；已归档的黑名单短信保留。
 
 发送示例：
 
@@ -69,6 +72,8 @@ SMS_GATEWAY_FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你�
 - `📩 收到短信`：设备、号码、内容和时间；
 - `✅/❌ 短信发送成功/失败`：设备、号码、状态和错误；
 - `🟢/🔴 设备上线/掉线`：设备标识和掉线原因。
+
+黑名单号码的入站短信是例外：网关仍会把短信写入本地数据库并标记为 `blacklisted`，但不会调用通用 Webhook、飞书机器人或钉钉机器人。
 
 自定义机器人 Hook 是单向入口，不能让网关读取群聊消息。若需要在群里发送命令来代发短信，必须另外创建平台应用和服务端，处理消息事件并校验用户与设备权限。
 
