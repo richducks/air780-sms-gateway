@@ -36,6 +36,7 @@ cd frontend && npm ci && npm run build
 ## 文档
 
 - [Docker 部署](docs/DOCKER_DEPLOYMENT.md)
+- [Docker 小白部署与配置手册](docs/DOCKER_BEGINNER_GUIDE.md)
 - [设备烧录与重复部署](docs/REPEATABLE_DEPLOYMENT.md)
 - [API 接入](docs/API_INTEGRATION.md)
 - [Linux 原生烧录](docs/LINUX_NATIVE_FLASH.md)

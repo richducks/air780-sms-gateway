@@ -10,6 +10,7 @@ frontend/dist/
 .env*
 !.env.example
 !.env.docker.example
+LOCAL_DEPLOYMENT.md
 config/
 project/
 log/
