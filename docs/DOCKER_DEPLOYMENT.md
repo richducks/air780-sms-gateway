@@ -103,10 +103,45 @@ docker compose start sms-gateway
 
 ## 6. 升级
 
+项目现在支持两种升级方式。
+
+### 6.1 推荐：其他电脑直接拉取已发布镜像
+
+默认镜像为：
+
+```text
+ghcr.io/richducks/air780-sms-gateway:latest
+```
+
+目标机已经完成首次部署后，以后升级只需要：
+
+```bash
+cd air780-sms-gateway
+docker compose pull sms-gateway
+docker compose up -d --no-build sms-gateway
+```
+
+也可以直接运行项目内的一键升级脚本：
+
+```bash
+bash scripts/docker-update.sh
+```
+
+脚本会拉取远程 `latest` 镜像、重建容器并检查健康状态。`sms-data` 命名卷不会被删除。
+
+如需固定到某个版本，可先指定镜像标签，例如：
+
+```bash
+AIR780_IMAGE=ghcr.io/richducks/air780-sms-gateway:v1.2.3 bash scripts/docker-update.sh
+```
+
+### 6.2 本机源码开发/测试后重新构建
+
+如果你改的是当前电脑上的源码，而不是使用 GitHub 发布镜像：
+
 ```bash
 docker compose build --pull
 docker compose up -d
-docker image prune
 ```
 
-升级不会清空 `sms-data`。升级前仍建议先备份数据库。
+GitHub `main` 分支更新后，`.github/workflows/docker-publish.yml` 会自动构建并发布 `latest`、Git 标签和提交 SHA 镜像。升级前仍建议先备份数据库。

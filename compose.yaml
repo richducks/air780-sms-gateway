@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: air780-sms-gateway:local
+    image: ${AIR780_IMAGE:-ghcr.io/richducks/air780-sms-gateway:latest}
     container_name: air780-sms-gateway
     restart: unless-stopped
     env_file:

@@ -400,13 +400,29 @@ http://服务器IP:8787/api/v1/openapi.json
 
 升级前先备份数据库。
 
-代码更新后执行：
+### 14.1 以后在别的电脑上升级：推荐方式
+
+本项目会把 `main` 分支构建成 Docker 镜像：
+
+```text
+ghcr.io/richducks/air780-sms-gateway:latest
+```
+
+目标电脑只要已经完成过首次部署，以后不需要安装 Node.js、Python，也不需要重新编译代码。进入项目目录执行：
 
 ```bash
-cd /home/sducks/Documents/CodexProjects/air780-sms-gateway
-docker compose build --pull
-docker compose up -d
+cd /你的目录/air780-sms-gateway
+docker compose pull sms-gateway
+docker compose up -d --no-build sms-gateway
 ```
+
+为了更省事，可以直接执行：
+
+```bash
+bash scripts/docker-update.sh
+```
+
+这个脚本等价于“拉取最新版 → 替换旧容器 → 检查健康状态”。短信、联系人和网页设置都保存在 `sms-data` 数据卷里，不会因为升级容器而清空。
 
 检查：
 
@@ -414,6 +430,16 @@ docker compose up -d
 docker compose ps
 docker compose logs --tail=100 sms-gateway
 curl http://127.0.0.1:8787/health
+```
+
+### 14.2 当前开发电脑修改源码后升级
+
+如果是你在当前电脑上改了项目代码，还没有发布远程镜像，则继续使用本地构建：
+
+```bash
+cd /home/sducks/Documents/CodexProjects/air780-sms-gateway
+docker compose build --pull
+docker compose up -d
 ```
 
 确认正常后，可清理不再使用的旧镜像：
