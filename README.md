@@ -22,6 +22,228 @@ cp .env.docker.example .env.docker
 
 **请勿将 `.env`、`.env.docker`、短信数据库、真实手机号或机器人 Hook 提交到 GitHub。** 默认 Compose 使用 `privileged: true` 支持 USB 热插拔，只适合可信的专用主机；固定设备可按部署文档缩小权限。公网使用时应通过 HTTPS 反向代理或 VPN 访问。
 
+## 一键升级
+
+本项目已经支持通过 GitHub Container Registry（GHCR）直接拉取最新 Docker 镜像。目标服务器正常情况下不需要重新安装 Python、Node.js，也不需要手工重新编译前后端。
+
+默认镜像：
+
+```text
+ghcr.io/richducks/air780-sms-gateway:latest
+```
+
+### 1. 日常升级：只需要一条命令
+
+如果这台服务器已经使用当前版本的项目文件部署过，进入项目目录后执行：
+
+```bash
+bash scripts/docker-update.sh
+```
+
+例如项目目录是：
+
+```text
+/home/ubuntu/air780-sms-gateway
+```
+
+则执行：
+
+```bash
+cd /home/ubuntu/air780-sms-gateway
+bash scripts/docker-update.sh
+```
+
+升级脚本会自动完成：
+
+1. 检查 Docker 是否已经安装；
+2. 检查 `docker compose` 是否可用；
+3. 检查 `.env.docker` 是否存在；
+4. 从 GHCR 拉取最新 `air780-sms-gateway` 镜像；
+5. 使用新镜像重新创建并启动容器；
+6. 等待容器健康检查；
+7. 成功后显示当前容器状态；
+8. 如果启动失败或变成 `unhealthy`，自动输出最近的容器日志。
+
+正常完成时会看到类似：
+
+```text
+准备升级 Air780 短信网关
+镜像: ghcr.io/richducks/air780-sms-gateway:latest
+数据卷 sms-data 不会被删除。
+升级完成，容器状态: healthy
+```
+
+### 2. 老版本第一次切换到一键升级
+
+如果服务器是在加入远程 Docker 镜像升级功能之前部署的，旧机器上的 `compose.yaml` 和 `scripts/docker-update.sh` 可能还是旧版本，甚至没有升级脚本。
+
+这种情况下第一次要先同步项目文件：
+
+```bash
+cd /你的目录/air780-sms-gateway
+git pull --ff-only
+bash scripts/docker-update.sh
+```
+
+例如：
+
+```bash
+cd /home/ubuntu/air780-sms-gateway
+git pull --ff-only
+bash scripts/docker-update.sh
+```
+
+第一次切换成功以后，日常升级通常只需要：
+
+```bash
+bash scripts/docker-update.sh
+```
+
+> `docker-update.sh` 负责升级 Docker 镜像和容器，本身不会执行 `git pull`。如果以后仓库里的 `compose.yaml`、升级脚本或宿主机部署配置发生变化，应先执行一次 `git pull --ff-only`，再运行升级脚本。
+
+### 3. 不使用脚本，直接用 Docker 命令升级
+
+如果希望完全使用 Docker 命令，也可以执行：
+
+```bash
+cd /你的目录/air780-sms-gateway
+docker compose pull sms-gateway
+docker compose up -d --no-build sms-gateway
+```
+
+其过程是：
+
+```text
+docker compose pull
+        ↓
+从 GHCR 下载最新镜像
+        ↓
+docker compose up -d --no-build
+        ↓
+使用新镜像替换旧容器并后台启动
+```
+
+这里使用 `--no-build` 很重要，它表示直接使用已经发布到 GHCR 的镜像，不在目标服务器重新执行 Dockerfile 构建。
+
+### 4. 固定到指定版本
+
+如果生产环境不希望跟随 `latest`，可以明确指定版本。
+
+例如升级并固定为 `v1.2.1`：
+
+```bash
+AIR780_IMAGE=ghcr.io/richducks/air780-sms-gateway:v1.2.1 \
+  bash scripts/docker-update.sh
+```
+
+这样即使以后 `latest` 已经升级到更高版本，本次运行仍会使用 `v1.2.1`。
+
+正式发布版本可以在本仓库的 GitHub Releases 页面查看。
+
+### 5. 升级后确认是否成功
+
+先看容器状态：
+
+```bash
+docker compose ps
+```
+
+正常情况下 `air780-sms-gateway` 应为 `Up`，健康状态最终应为 `healthy`。
+
+然后检查健康接口：
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+当前版本正常会返回类似：
+
+```json
+{
+  "ok": true,
+  "version": "1.2.1",
+  "online_devices": 1,
+  "modem_connected": true
+}
+```
+
+字段含义：
+
+- `ok: true`：网关 Web 服务本身正常；
+- `version`：当前实际运行的网关版本；
+- `online_devices`：当前在线 Air780 设备数量；
+- `modem_connected`：是否至少有一台 Air780 已连接。
+
+只看到 `ok: true` 不代表 USB 模块一定在线，还要同时检查 `online_devices` 和 `modem_connected`。
+
+### 6. 升级异常时怎么看日志
+
+先查看容器状态：
+
+```bash
+docker compose ps
+```
+
+查看最近 100 行日志：
+
+```bash
+docker compose logs --tail=100 sms-gateway
+```
+
+持续观察日志：
+
+```bash
+docker compose logs -f sms-gateway
+```
+
+退出实时日志：
+
+```text
+Ctrl + C
+```
+
+### 7. 升级会不会丢短信和配置
+
+正常升级不会删除短信数据库。
+
+Compose 使用 Docker 命名卷：
+
+```text
+sms-data
+```
+
+数据库在容器内保存为：
+
+```text
+/data/sms_gateway.db
+```
+
+其中包含短信、联系人、黑名单、设备信息、管理员密码哈希、API 凭据和飞书/钉钉配置等数据。重新拉取镜像、删除旧容器并重新创建容器，不会自动删除该数据卷。
+
+**不要为了升级执行：**
+
+```bash
+docker compose down -v
+```
+
+其中 `-v` 会删除 Docker 数据卷，可能导致短信和配置丢失。
+
+重要服务器仍建议升级前先备份数据库，完整备份步骤见 [Docker 部署说明](docs/DOCKER_DEPLOYMENT.md)。
+
+### 8. 最后只记住这两条
+
+普通日常升级：
+
+```bash
+cd /你的目录/air780-sms-gateway && bash scripts/docker-update.sh
+```
+
+项目文件也需要同步时：
+
+```bash
+cd /你的目录/air780-sms-gateway && git pull --ff-only && bash scripts/docker-update.sh
+```
+
 ## 固件与硬件
 
 本仓库提供 `firmware/bridge/main.lua` 桥接脚本，不再分发第三方 LuatOS Core、烧录工具或包含 Core 的 `.soc` 固件。请从合宙官方渠道获取与 Air780EPM 匹配的 Core 和烧录工具，并按 [设备烧录说明](docs/REPEATABLE_DEPLOYMENT.md) 构建和烧录。烧录需要接触设备的 BOOT/RESET 按键。4G 开关默认关闭；即使关闭数据网络，蜂窝信号仍应独立显示。有线网络保持优先，4G 不接管 DNS。
