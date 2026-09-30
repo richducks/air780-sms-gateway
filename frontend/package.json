@@ -1,7 +1,7 @@
 {
   "name": "air780-sms-console",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.1",
   "type": "module",
   "scripts": {"dev": "vite", "build": "vite build"},
   "dependencies": {"vue": "^3.5.0"},

@@ -14,6 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import __version__
 from .admin import AdminAccess
 from .config import Settings
 from .manager import DeviceManager
@@ -225,7 +226,8 @@ class Gateway:
     def health(self) -> dict:
         devices = self.store.list_devices()
         online = [d for d in devices if d["status"] == "online"]
-        return {"ok": True, "online_devices": len(online), "total_devices": len(devices),
+        return {"ok": True, "version": __version__,
+                "online_devices": len(online), "total_devices": len(devices),
                 "modem_connected": bool(online),
                 "serial_port": online[0]["serial_port"] if len(online) == 1 else None,
                 "devices": devices}
