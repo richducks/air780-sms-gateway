@@ -22,6 +22,7 @@ class Settings:
     serial_port: str = os.getenv("SMS_GATEWAY_SERIAL_PORT", "auto")
     serial_baudrate: int = _int("SMS_GATEWAY_SERIAL_BAUDRATE", 115200)
     poll_seconds: int = _int("SMS_GATEWAY_POLL_SECONDS", 3)
+    send_attempts: int = _int("SMS_GATEWAY_SEND_ATTEMPTS", 3)
     delete_after_receive: bool = os.getenv("SMS_GATEWAY_DELETE_AFTER_RECEIVE", "true").lower() in {
         "1", "true", "yes", "on"
     }

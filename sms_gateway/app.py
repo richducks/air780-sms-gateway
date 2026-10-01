@@ -34,7 +34,7 @@ class Gateway:
         self.admin = AdminAccess(self.store, settings.admin_password)
         self.manager = DeviceManager(self.store, settings.serial_baudrate, settings.poll_seconds,
                                      settings.serial_port, self._received, self._sent,
-                                     self._device_state)
+                                     self._device_state, settings.send_attempts)
 
     def start(self) -> None:
         self.manager.start()
@@ -66,12 +66,19 @@ class Gateway:
 
     def _received(self, device_id: str, sms: ReceivedSms) -> None:
         blocked = self.store.is_blacklisted(sms.sender)
+        ad_rule = None if blocked else self.store.match_advertisement(sms.sender, sms.body)
+        advertisement = ad_rule is not None
+        status = "blacklisted" if blocked else "advertisement" if advertisement else "received"
         message_id = self.store.create(
-            "inbound", sms.sender, sms.body, "blacklisted" if blocked else "received",
-            sms.index, device_id=device_id, blacklisted=blocked
+            "inbound", sms.sender, sms.body, status, sms.index, device_id=device_id,
+            blacklisted=blocked, advertisement=advertisement
         )
         if blocked:
             log.info("stored SMS from blacklisted number %s without notifications", sms.sender)
+            return
+        if advertisement:
+            log.info("stored advertisement SMS from %s matched rule %s without notifications",
+                     sms.sender, ad_rule.get("id"))
             return
         event = {"event": "sms.received", "device_id": device_id,
                  "device_label": self._device_label(device_id),
@@ -232,6 +239,50 @@ class Gateway:
                 "serial_port": online[0]["serial_port"] if len(online) == 1 else None,
                 "devices": devices}
 
+    def portal_summary(self) -> dict:
+        """Return a read-only, privacy-safe summary for embedded team portals."""
+        devices = self.store.list_devices()
+        messages = self.store.list(500)
+        outbound = [item for item in messages if item.get("direction") == "outbound"]
+        successful = [item for item in outbound if item.get("status") in {"sent", "delivered"}]
+        failed = [item for item in messages if item.get("status") in {"failed", "webhook_failed"}]
+        queued = [item for item in messages if item.get("status") == "queued"]
+        recent = []
+        for item in messages[:8]:
+            recent.append({
+                "direction": item.get("direction"),
+                "status": item.get("status"),
+                "device": self._device_label(item.get("device_id")) or "未分配设备",
+                "created_at": item.get("created_at"),
+            })
+        safe_devices = [{
+            "label": str(item.get("label") or "未命名设备"),
+            "status": item.get("status") or "unknown",
+            "firmware_version": item.get("firmware_version") or "",
+            "last_seen_at": item.get("last_seen_at"),
+            "has_error": bool(item.get("last_error")),
+        } for item in devices]
+        return {
+            "ok": True,
+            "version": __version__,
+            "online_devices": sum(1 for item in devices if item.get("status") == "online"),
+            "total_devices": len(devices),
+            "messages": {
+                "total": len(messages),
+                "inbound": sum(1 for item in messages if item.get("direction") == "inbound"),
+                "outbound": len(outbound),
+                "failed": len(failed),
+                "queued": len(queued),
+                "success_rate": round(len(successful) * 100 / len(outbound), 1) if outbound else 100.0,
+            },
+            "integrations": {
+                "feishu": sum(1 for item in self.public_feishu_webhooks() if item.get("enabled")),
+                "dingtalk": sum(1 for item in self.public_dingtalk_webhooks() if item.get("enabled")),
+            },
+            "devices": safe_devices,
+            "recent": recent,
+        }
+
     def four_g(self, request: dict) -> dict:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -284,26 +335,35 @@ def handler_factory(gateway: Gateway):
             self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
 
+        def _session_token(self) -> str:
+            return self.headers.get('X-User-Session', '') or self.headers.get('X-Admin-Session', '')
+
+        def _session_user(self) -> dict | None:
+            return gateway.admin.session_user(self._session_token())
+
         def _scope(self) -> str | None:
+            if self._session_user():
+                return 'write'
             token = self.headers.get("Authorization", "").removeprefix("Bearer ")
             expected = gateway.settings.api_token
-            if expected and hmac.compare_digest(token, expected):
+            if expected and token and hmac.compare_digest(token, expected):
                 return 'write'
-            return gateway.admin.scope(token) if token else (None if expected else 'write')
+            return gateway.admin.scope(token) if token else None
 
         def _require_auth(self, write: bool = False) -> bool:
             scope = self._scope()
             if scope and (not write or scope == 'write'):
                 return True
             self._json(HTTPStatus.FORBIDDEN if scope else HTTPStatus.UNAUTHORIZED,
-                       {"error": "read-only API key" if scope else "invalid bearer token"})
+                       {"error": "read-only API key" if scope else "login required"})
             return False
 
         def _require_admin(self) -> bool:
-            token = self.headers.get('X-Admin-Session', '')
-            if gateway.admin.is_admin(token):
+            user = self._session_user()
+            if user and user.get('role') == 'admin':
                 return True
-            self._json(HTTPStatus.UNAUTHORIZED, {'error': 'admin session required'})
+            self._json(HTTPStatus.FORBIDDEN if user else HTTPStatus.UNAUTHORIZED,
+                       {'error': 'administrator required' if user else 'login required'})
             return False
 
         def _payload(self) -> dict:
@@ -337,12 +397,27 @@ def handler_factory(gateway: Gateway):
             if parsed.path == "/health":
                 self._json(HTTPStatus.OK, gateway.health())
                 return
+            if parsed.path == "/api/v1/portal/summary":
+                self._json(HTTPStatus.OK, gateway.portal_summary())
+                return
+            if parsed.path in {"/portal", "/portal/", "/portal.html"}:
+                if self._static("/portal.html"):
+                    return
             if parsed.path == "/" and self._static(parsed.path):
                 return
             if parsed.path == "/":
                 self._send(HTTPStatus.OK, MOBILE_UI.encode("utf-8"), "text/html; charset=utf-8")
                 return
             if parsed.path.startswith("/assets/") and self._static(parsed.path):
+                return
+            if parsed.path == '/api/v1/auth/me':
+                user = self._session_user()
+                self._json(HTTPStatus.OK if user else HTTPStatus.UNAUTHORIZED,
+                           {'user': user} if user else {'error': 'login required'})
+                return
+            if parsed.path == '/api/v1/admin/users':
+                if self._require_admin():
+                    self._json(HTTPStatus.OK, {'users': gateway.admin.list_users()})
                 return
             if parsed.path == '/api/v1/admin/keys':
                 if self._require_admin():
@@ -365,7 +440,20 @@ def handler_factory(gateway: Gateway):
                 self._json(HTTPStatus.OK, {"contacts": gateway.store.list_contacts()})
                 return
             if parsed.path == "/api/v1/blacklist":
-                self._json(HTTPStatus.OK, {"blacklist": gateway.store.list_blacklist()})
+                query = parse_qs(parsed.query)
+                try:
+                    search = str(query.get("q", [""])[0]).strip()
+                    match_type = str(query.get("match_type", [""])[0]).strip() or None
+                    self._json(HTTPStatus.OK, {"blacklist": gateway.store.list_blacklist(search, match_type)})
+                except ValueError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            if parsed.path == "/api/v1/ad-rules":
+                query = parse_qs(parsed.query)
+                search = str(query.get("q", [""])[0]).strip()
+                enabled_value = str(query.get("enabled", [""])[0]).strip().lower()
+                enabled = None if not enabled_value else enabled_value in {'1', 'true', 'yes', 'on'}
+                self._json(HTTPStatus.OK, {"rules": gateway.store.list_ad_rules(search, enabled)})
                 return
             if parsed.path == "/api/v1/network/4g":
                 self._json(HTTPStatus.OK, gateway.four_g({'action': 'status'}))
@@ -399,13 +487,30 @@ def handler_factory(gateway: Gateway):
 
         def do_POST(self) -> None:
             path = urlparse(self.path).path
-            if path == '/api/v1/admin/login':
+            if path in {'/api/v1/auth/login', '/api/v1/admin/login'}:
                 try:
                     payload = self._payload()
                     session = gateway.admin.login(str(payload.get('username', '')),
                                                   str(payload.get('password', '')))
+                    user = gateway.admin.session_user(session or '')
                     self._json(HTTPStatus.OK if session else HTTPStatus.UNAUTHORIZED,
-                               {'session': session} if session else {'error': '账号或密码错误'})
+                               {'session': session, 'user': user} if session
+                               else {'error': '账号或密码错误或用户已禁用'})
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            if path == '/api/v1/auth/logout':
+                gateway.admin.logout(self._session_token())
+                self._json(HTTPStatus.OK, {'ok': True})
+                return
+            if path == '/api/v1/admin/users':
+                if not self._require_admin():
+                    return
+                try:
+                    payload = self._payload()
+                    item = gateway.admin.create_user(str(payload.get('username', '')),
+                                                     str(payload.get('password', '')))
+                    self._json(HTTPStatus.CREATED, {'user': item, 'users': gateway.admin.list_users()})
                 except (ValueError, json.JSONDecodeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
@@ -422,7 +527,20 @@ def handler_factory(gateway: Gateway):
                 return
             if not self._require_auth(write=True):
                 return
+            if path == "/api/v1/ad-rules":
+                try:
+                    payload = self._payload()
+                    item = gateway.store.create_ad_rule(
+                        str(payload.get('pattern', '')), str(payload.get('match_type', 'contains')),
+                        str(payload.get('field', 'body')), str(payload.get('label', '')),
+                        bool(payload.get('enabled', True)))
+                    self._json(HTTPStatus.CREATED, item)
+                except (ValueError, json.JSONDecodeError, AttributeError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
             if path == "/api/v1/integrations/feishu":
+                if not self._require_admin():
+                    return
                 try:
                     payload = self._payload()
                     self._json(HTTPStatus.CREATED, gateway.add_feishu_webhook(
@@ -431,6 +549,8 @@ def handler_factory(gateway: Gateway):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             if path == "/api/v1/integrations/dingtalk":
+                if not self._require_admin():
+                    return
                 try:
                     payload = self._payload()
                     self._json(HTTPStatus.CREATED, gateway.add_dingtalk_webhook(
@@ -452,6 +572,21 @@ def handler_factory(gateway: Gateway):
 
         def do_PATCH(self) -> None:
             path = urlparse(self.path).path
+            user_match = re.fullmatch(r'/api/v1/admin/users/([^/]+)', path)
+            if user_match:
+                if not self._require_admin():
+                    return
+                try:
+                    payload = self._payload()
+                    if type(payload.get('enabled')) is not bool:
+                        raise ValueError('enabled must be a boolean')
+                    user = gateway.admin.update_user(unquote(user_match.group(1)), payload['enabled'])
+                    self._json(HTTPStatus.OK, {'user': user, 'users': gateway.admin.list_users()})
+                except KeyError:
+                    self._json(HTTPStatus.NOT_FOUND, {'error': 'user not found'})
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
             admin_match = re.fullmatch(r'/api/v1/admin/keys/([a-f0-9]+)', path)
             if admin_match:
                 if not self._require_admin():
@@ -466,6 +601,19 @@ def handler_factory(gateway: Gateway):
                 return
             if not self._require_auth(write=True):
                 return
+            ad_match = re.fullmatch(r'/api/v1/ad-rules/(\d+)', path)
+            if ad_match:
+                try:
+                    payload = self._payload()
+                    item = gateway.store.update_ad_rule(
+                        int(ad_match.group(1)), str(payload.get('pattern', '')),
+                        str(payload.get('match_type', 'contains')), str(payload.get('field', 'body')),
+                        str(payload.get('label', '')), bool(payload.get('enabled', True)))
+                    self._json(HTTPStatus.OK if item else HTTPStatus.NOT_FOUND,
+                               item or {'error': 'ad rule not found'})
+                except (ValueError, json.JSONDecodeError, AttributeError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
             favorite_match = re.fullmatch(r"/api/v1/messages/(\d+)/favorite", path)
             if favorite_match:
                 try:
@@ -477,6 +625,8 @@ def handler_factory(gateway: Gateway):
                                item or {"error": "message not found"})
                 except (ValueError, json.JSONDecodeError, AttributeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            if path.startswith('/api/v1/integrations/') and not self._require_admin():
                 return
             hook_match = re.fullmatch(r"/api/v1/integrations/feishu/([^/]+)", path)
             if hook_match:
@@ -516,22 +666,40 @@ def handler_factory(gateway: Gateway):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
         def do_PUT(self) -> None:
-            if urlparse(self.path).path == '/api/v1/admin/password':
-                if not self._require_admin():
+            path = urlparse(self.path).path
+            if path in {'/api/v1/auth/password', '/api/v1/admin/password'}:
+                if not self._require_auth(write=True):
                     return
                 try:
                     payload = self._payload()
-                    gateway.admin.change_password(str(payload.get('current_password', '')),
-                                                  str(payload.get('new_password', '')))
+                    gateway.admin.change_own_password(
+                        self._session_token(), str(payload.get('current_password', '')),
+                        str(payload.get('new_password', '')))
                     self._json(HTTPStatus.OK, {'ok': True})
                 except PermissionError as exc:
                     self._json(HTTPStatus.FORBIDDEN, {'error': str(exc)})
                 except (ValueError, json.JSONDecodeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
+            password_match = re.fullmatch(r'/api/v1/admin/users/([^/]+)/password', path)
+            if password_match:
+                if not self._require_admin():
+                    return
+                try:
+                    payload = self._payload()
+                    gateway.admin.reset_user_password(unquote(password_match.group(1)),
+                                                      str(payload.get('password', '')))
+                    self._json(HTTPStatus.OK, {'ok': True})
+                except KeyError:
+                    self._json(HTTPStatus.NOT_FOUND, {'error': 'user not found'})
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
             if not self._require_auth(write=True):
                 return
-            if urlparse(self.path).path == "/api/v1/network/4g":
+            if path == "/api/v1/network/4g":
+                if not self._require_admin():
+                    return
                 try:
                     payload = self._payload()
                     if type(payload.get('enabled')) is not bool:
@@ -545,22 +713,22 @@ def handler_factory(gateway: Gateway):
                 except (ValueError, json.JSONDecodeError, AttributeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
                 return
-            blacklist_match = re.fullmatch(r"/api/v1/blacklist/([^/]+)", urlparse(self.path).path)
+            blacklist_match = re.fullmatch(r"/api/v1/blacklist/([^/]+)", path)
             if blacklist_match:
                 try:
-                    phone = unquote(blacklist_match.group(1))
-                    if not re.fullmatch(r"\+?[0-9]{5,20}", phone):
-                        raise ValueError("号码须为 5–20 位数字，可带开头的 +")
+                    pattern = unquote(blacklist_match.group(1))
                     payload = self._payload()
                     label = str(payload.get("label", "")).strip()
                     note = str(payload.get("note", "")).strip()
+                    match_type = str(payload.get("match_type", "exact")).strip().lower() or "exact"
                     if len(label) > 80 or len(note) > 500:
                         raise ValueError("备注名称最多 80 个字符，详细备注最多 500 个字符")
-                    self._json(HTTPStatus.OK, gateway.store.upsert_blacklist(phone, label, note))
+                    self._json(HTTPStatus.OK, gateway.store.upsert_blacklist(
+                        pattern, label, note, match_type))
                 except (ValueError, json.JSONDecodeError, AttributeError) as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
-            match = re.fullmatch(r"/api/v1/contacts/([^/]+)", urlparse(self.path).path)
+            match = re.fullmatch(r"/api/v1/contacts/([^/]+)", path)
             if not match:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
@@ -580,7 +748,20 @@ def handler_factory(gateway: Gateway):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
         def do_DELETE(self) -> None:
-            admin_match = re.fullmatch(r'/api/v1/admin/keys/([a-f0-9]+)', urlparse(self.path).path)
+            path = urlparse(self.path).path
+            user_match = re.fullmatch(r'/api/v1/admin/users/([^/]+)', path)
+            if user_match:
+                if not self._require_admin():
+                    return
+                try:
+                    if gateway.admin.delete_user(unquote(user_match.group(1))):
+                        self._json(HTTPStatus.OK, {'users': gateway.admin.list_users()})
+                    else:
+                        self._json(HTTPStatus.NOT_FOUND, {'error': 'user not found'})
+                except ValueError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {'error': str(exc)})
+                return
+            admin_match = re.fullmatch(r'/api/v1/admin/keys/([a-f0-9]+)', path)
             if admin_match:
                 if not self._require_admin():
                     return
@@ -590,30 +771,49 @@ def handler_factory(gateway: Gateway):
                 return
             if not self._require_auth(write=True):
                 return
-            contact_match = re.fullmatch(r"/api/v1/contacts/([^/]+)", urlparse(self.path).path)
+            device_match = re.fullmatch(r'/api/v1/devices/([^/]+)', path)
+            if device_match:
+                if not self._require_admin():
+                    return
+                result = gateway.store.delete_device(unquote(device_match.group(1)))
+                if result == 'deleted':
+                    self._json(HTTPStatus.OK, {'ok': True})
+                elif result == 'online':
+                    self._json(HTTPStatus.CONFLICT, {'error': '在线设备不能删除，请先断开设备'})
+                else:
+                    self._json(HTTPStatus.NOT_FOUND, {'error': 'device not found'})
+                return
+            ad_match = re.fullmatch(r'/api/v1/ad-rules/(\d+)', path)
+            if ad_match:
+                if gateway.store.delete_ad_rule(int(ad_match.group(1))):
+                    self._json(HTTPStatus.OK, {'ok': True})
+                else:
+                    self._json(HTTPStatus.NOT_FOUND, {'error': 'ad rule not found'})
+                return
+            contact_match = re.fullmatch(r"/api/v1/contacts/([^/]+)", path)
             if contact_match:
                 if gateway.store.delete_contact(unquote(contact_match.group(1))):
                     self._json(HTTPStatus.OK, {"ok": True})
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "contact not found"})
                 return
-            blacklist_match = re.fullmatch(r"/api/v1/blacklist/([^/]+)", urlparse(self.path).path)
+            blacklist_match = re.fullmatch(r"/api/v1/blacklist/([^/]+)", path)
             if blacklist_match:
                 if gateway.store.delete_blacklist(unquote(blacklist_match.group(1))):
                     self._json(HTTPStatus.OK, {"ok": True})
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "blacklist entry not found"})
                 return
-            dingtalk_match = re.fullmatch(r"/api/v1/integrations/dingtalk/([^/]+)",
-                                         urlparse(self.path).path)
+            if path.startswith('/api/v1/integrations/') and not self._require_admin():
+                return
+            dingtalk_match = re.fullmatch(r"/api/v1/integrations/dingtalk/([^/]+)", path)
             if dingtalk_match:
                 try:
                     self._json(HTTPStatus.OK, gateway.delete_dingtalk_webhook(dingtalk_match.group(1)))
                 except KeyError:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "webhook not found"})
                 return
-            match = re.fullmatch(r"/api/v1/integrations/feishu/([^/]+)",
-                                 urlparse(self.path).path)
+            match = re.fullmatch(r"/api/v1/integrations/feishu/([^/]+)", path)
             if not match:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
@@ -628,8 +828,8 @@ def handler_factory(gateway: Gateway):
 def run(settings: Settings | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = settings or Settings()
-    if settings.bind_host not in ("127.0.0.1", "::1", "localhost") and not settings.api_token:
-        raise SystemExit("SMS_GATEWAY_API_TOKEN is required when listening outside localhost")
+    if settings.bind_host not in ("127.0.0.1", "::1", "localhost") and settings.admin_password == "admin":
+        log.warning("default admin password is still in use; change it immediately after login")
     gateway = Gateway(settings)
     gateway.start()
     server = ThreadingHTTPServer((settings.bind_host, settings.bind_port), handler_factory(gateway))

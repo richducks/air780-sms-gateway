@@ -129,6 +129,8 @@ bash scripts/docker-update.sh
 
 脚本会拉取远程 `latest` 镜像、重建容器并检查健康状态。`sms-data` 命名卷不会被删除。
 
+网关对单条短信的临时发送失败默认会自动重试 3 次。生产环境可在 `.env.docker` 中设置 `SMS_GATEWAY_SEND_ATTEMPTS=3` 调整次数；建议保持 2–3 次，不要设置过大，以免真实故障时长时间占用发送队列。
+
 如需固定到某个版本，可先指定镜像标签，例如：
 
 ```bash
@@ -145,3 +147,13 @@ docker compose up -d
 ```
 
 GitHub `main` 分支更新后，`.github/workflows/docker-publish.yml` 会自动构建并发布 `latest`、Git 标签和提交 SHA 镜像。升级前仍建议先备份数据库。
+
+## 7. 发布前验收
+
+源码仓库新增统一验收入口：
+
+```bash
+./scripts/verify-release.sh
+```
+
+它会依次执行 Python 单元测试、前端锁定依赖构建、Docker Compose 配置解析，以及关键部署脚本的 Bash 语法检查。只有这些基础检查全部通过，才适合作为发布候选版本继续做真机短信收发验收。

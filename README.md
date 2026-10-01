@@ -1,6 +1,6 @@
 # Air780 USB 短信网关
 
-当前发布版本：**v1.2.1**（网关应用与桥接固件版本统一）。
+当前开发验收版本：**v1.3.0-rc1**（桥接固件仍为 v1.2.1；本次主要增强网关可靠性和可验证性）。
 
 Air780 / YN076 USB 模块的自托管短信网关。设备端使用 LuatOS 短信接口和 USB VUART 与 Python 服务通信；服务通过 Vue 网页和 HTTP API 管理短信。支持多设备、会话式回复、通讯录、收藏、黑名单、设备备注、管理员分配 API 凭据、飞书与钉钉机器人，以及可手动开启的 4G 备用数据网络。
 
@@ -176,6 +176,16 @@ curl http://127.0.0.1:8787/health
 
 只看到 `ok: true` 不代表 USB 模块一定在线，还要同时检查 `online_devices` 和 `modem_connected`。
 
+### 5.1 本次 v1.3.0-rc1 新增的发送重试
+
+借鉴成熟短信网关常见的失败重试设计，网关现在会在一次短信发送发生临时串口/模块错误时自动重试，默认最多 **3 次**。可通过环境变量调整：
+
+```bash
+SMS_GATEWAY_SEND_ATTEMPTS=3
+```
+
+该机制只处理一次已入队消息的短暂发送失败，不会无限重试；达到上限后消息仍会明确标记为 `failed` 并记录最后一次错误，便于排查。
+
 ### 6. 升级异常时怎么看日志
 
 先查看容器状态：
@@ -255,6 +265,7 @@ cd /你的目录/air780-sms-gateway && git pull --ff-only && bash scripts/docker
 ```bash
 python3 -m unittest discover -v
 cd frontend && npm ci && npm run build
+./scripts/verify-release.sh
 ```
 
 ## 文档

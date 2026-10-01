@@ -28,7 +28,8 @@ class DeviceManager(threading.Thread):
     def __init__(self, store: MessageStore, baudrate: int, poll_seconds: int,
                  configured_port: str, on_receive: Callable[[str, ReceivedSms], None],
                  on_sent: Callable[[int, bool, str | None], None],
-                 on_state: Callable[[str, str, str | None], None] | None = None):
+                 on_state: Callable[[str, str, str | None], None] | None = None,
+                 send_attempts: int = 3):
         super().__init__(name="device-manager", daemon=True)
         self.store = store
         self.baudrate = baudrate
@@ -37,6 +38,7 @@ class DeviceManager(threading.Thread):
         self.on_receive = on_receive
         self.on_sent = on_sent
         self.on_state = on_state
+        self.send_attempts = max(1, send_attempts)
         self.stop_event = threading.Event()
         self._lock = threading.RLock()
         self._devices: dict[str, RuntimeDevice] = {}
@@ -70,7 +72,7 @@ class DeviceManager(threading.Thread):
             worker = ModemWorker(
                 modem, self.poll_seconds,
                 lambda sms, did=device_id: self.on_receive(did, sms),
-                False, reconnect=False,
+                False, reconnect=False, send_attempts=self.send_attempts,
             )
             runtime = RuntimeDevice(device_id, imei, port, worker, str(info.get("version", "")))
             with self._lock:

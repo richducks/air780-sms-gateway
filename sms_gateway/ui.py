@@ -26,21 +26,35 @@ def openapi_document(base_url: str = "http://127.0.0.1:8787") -> dict:
         "openapi": "3.0.3",
         "info": {"title": "Air780 SMS Gateway API", "version": "2.1.0"},
         "servers": [{"url": base_url}],
-        "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
-        "security": [{"bearerAuth": []}],
+        "components": {"securitySchemes": {
+            "userSession": {"type": "apiKey", "in": "header", "name": "X-User-Session",
+                            "description": "网页登录后取得的用户会话，仅供浏览器/交互式客户端"},
+            "bearerAuth": {"type": "http", "scheme": "bearer",
+                           "description": "仅供 ERP、自动化脚本等机器调用方的 API 凭据"}
+        }},
+        "security": [{"userSession": []}, {"bearerAuth": []}],
         "paths": {
             "/health": {"get": {"security": [], "summary": "网关和设备状态", "responses": {"200": {"description": "OK"}}}},
             "/api/v1/devices": {"get": {"summary": "列出设备", "responses": {"200": {"description": "设备列表"}}}},
-            "/api/v1/devices/{device_id}": {"patch": {"summary": "设置设备名称", "parameters": [{"in": "path", "name": "device_id", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已更新"}}}},
+            "/api/v1/auth/login": {"post": {"security": [], "summary": "账号密码登录", "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "required": ["username", "password"], "properties": {"username": {"type": "string"}, "password": {"type": "string", "format": "password"}}}}}}, "responses": {"200": {"description": "返回用户会话和用户信息"}, "401": {"description": "账号、密码错误或用户已禁用"}}}},
+            "/api/v1/auth/me": {"get": {"summary": "读取当前登录用户", "responses": {"200": {"description": "当前用户"}, "401": {"description": "会话失效"}}}},
+            "/api/v1/auth/logout": {"post": {"summary": "退出网页登录", "responses": {"200": {"description": "已退出"}}}},
+            "/api/v1/auth/password": {"put": {"summary": "修改当前用户密码", "responses": {"200": {"description": "已修改并使当前会话失效"}}}},
+            "/api/v1/admin/users": {"get": {"summary": "管理员列出用户", "responses": {"200": {"description": "用户列表"}}}, "post": {"summary": "管理员创建普通 user", "responses": {"201": {"description": "用户已创建"}}}},
+            "/api/v1/admin/users/{username}": {"patch": {"summary": "管理员启用或禁用普通用户", "parameters": [{"in": "path", "name": "username", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "用户已更新"}}}, "delete": {"summary": "管理员删除普通用户", "parameters": [{"in": "path", "name": "username", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "用户已删除"}}}},
+            "/api/v1/admin/users/{username}/password": {"put": {"summary": "管理员重置用户密码", "parameters": [{"in": "path", "name": "username", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "密码已重置"}}}},
+            "/api/v1/devices/{device_id}": {"patch": {"summary": "设置设备名称", "parameters": [{"in": "path", "name": "device_id", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已更新"}}}, "delete": {"summary": "管理员删除离线设备登记（保留历史短信）", "parameters": [{"in": "path", "name": "device_id", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已删除"}, "409": {"description": "在线设备禁止删除"}}}},
+            "/api/v1/ad-rules": {"get": {"summary": "列出广告过滤规则", "parameters": [{"in": "query", "name": "q", "schema": {"type": "string"}}, {"in": "query", "name": "enabled", "schema": {"type": "boolean"}}], "responses": {"200": {"description": "广告规则列表"}}}, "post": {"summary": "创建广告过滤规则", "responses": {"201": {"description": "规则已创建"}}}},
+            "/api/v1/ad-rules/{id}": {"patch": {"summary": "更新广告过滤规则", "parameters": [{"in": "path", "name": "id", "required": True, "schema": {"type": "integer"}}], "responses": {"200": {"description": "规则已更新"}}}, "delete": {"summary": "删除广告过滤规则", "parameters": [{"in": "path", "name": "id", "required": True, "schema": {"type": "integer"}}], "responses": {"200": {"description": "规则已删除"}}}},
             "/api/v1/messages": {
                 "get": {"summary": "统一收件箱", "parameters": [{"in": "query", "name": "direction", "schema": {"type": "string", "enum": ["inbound", "outbound"]}}, {"in": "query", "name": "device_id", "schema": {"type": "string"}}, {"in": "query", "name": "limit", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "短信列表"}}},
                 "post": {"summary": "指定设备发送短信", "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "required": ["phone", "body"], "properties": {"device_id": {"type": "string"}, "phone": {"type": "string"}, "body": {"type": "string", "maxLength": 134}}}}}}, "responses": {"202": {"description": "已进入发送队列"}}}
             },
             "/api/v1/messages/{id}": {"get": {"summary": "查询发送状态", "parameters": [{"in": "path", "name": "id", "required": True, "schema": {"type": "integer"}}], "responses": {"200": {"description": "短信详情"}}}},
-            "/api/v1/blacklist": {"get": {"summary": "列出黑名单", "responses": {"200": {"description": "黑名单列表"}}}},
-            "/api/v1/blacklist/{phone}": {
-                "put": {"summary": "加入或更新黑名单", "parameters": [{"in": "path", "name": "phone", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已保存"}}},
-                "delete": {"summary": "移出黑名单", "parameters": [{"in": "path", "name": "phone", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已移出"}}}
+            "/api/v1/blacklist": {"get": {"summary": "列出和搜索黑名单规则", "parameters": [{"in": "query", "name": "q", "schema": {"type": "string"}}, {"in": "query", "name": "match_type", "schema": {"type": "string", "enum": ["exact", "contains", "regex"]}}], "responses": {"200": {"description": "黑名单规则列表"}}}},
+            "/api/v1/blacklist/{pattern}": {
+                "put": {"summary": "加入或更新黑名单规则", "parameters": [{"in": "path", "name": "pattern", "required": True, "schema": {"type": "string"}}], "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {"match_type": {"type": "string", "enum": ["exact", "contains", "regex"], "default": "exact"}, "label": {"type": "string"}, "note": {"type": "string"}}}}}}, "responses": {"200": {"description": "已保存"}, "400": {"description": "规则或正则表达式无效"}}},
+                "delete": {"summary": "移出黑名单规则", "parameters": [{"in": "path", "name": "pattern", "required": True, "schema": {"type": "string"}}], "responses": {"200": {"description": "已移出"}}}
             }
         }
     }

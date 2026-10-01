@@ -154,7 +154,7 @@ class SerialModem:
 class ModemWorker(threading.Thread):
     def __init__(self, modem: SerialModem, poll_seconds: int,
                  on_receive: Callable[[ReceivedSms], None], delete_after_receive: bool,
-                 reconnect: bool = True):
+                 reconnect: bool = True, send_attempts: int = 3):
         super().__init__(name="modem-worker", daemon=True)
         self.modem = modem
         self.poll_seconds = max(1, poll_seconds)
@@ -163,6 +163,7 @@ class ModemWorker(threading.Thread):
         self.stop_event = threading.Event()
         self.last_error: str | None = None
         self.reconnect = reconnect
+        self.send_attempts = max(1, send_attempts)
 
     @property
     def connected(self) -> bool:
@@ -197,10 +198,19 @@ class ModemWorker(threading.Thread):
                 message_id, phone, body, callback = self.outbox.get_nowait()
             except queue.Empty:
                 return
-            try:
-                self.modem.send_sms(phone, body)
-                callback(message_id, True, None)
-            except Exception as exc:
-                callback(message_id, False, str(exc))
-            finally:
-                self.outbox.task_done()
+            error: str | None = None
+            sent = False
+            for attempt in range(1, self.send_attempts + 1):
+                try:
+                    self.modem.send_sms(phone, body)
+                    sent = True
+                    error = None
+                    break
+                except Exception as exc:
+                    error = str(exc)
+                    log.warning("SMS send attempt %d/%d failed for message %s: %s",
+                                attempt, self.send_attempts, message_id, exc)
+                    if attempt < self.send_attempts:
+                        self.stop_event.wait(min(2 ** (attempt - 1), 4))
+            callback(message_id, sent, error)
+            self.outbox.task_done()

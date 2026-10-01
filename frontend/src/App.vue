@@ -2,9 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const view = ref('messages')
-const navIds = ['messages','devices','contacts','favorites','blacklist','settings']
-const navLabels = {messages:'短信',devices:'设备',contacts:'通讯录',favorites:'收藏',blacklist:'黑名单',settings:'设置'}
-const navDescriptions = {messages:'查看和发送短信',devices:'管理短信设备和 4G 网络',contacts:'号码与备注',favorites:'保存的重要短信',blacklist:'拦截与归档',settings:'连接与界面偏好'}
+const navIds = ['messages','devices','contacts','favorites','ads','blacklist','settings']
+const navLabels = {messages:'短信',devices:'设备',contacts:'通讯录',favorites:'收藏',ads:'广告',blacklist:'黑名单',settings:'设置'}
+const navDescriptions = {messages:'查看和发送短信',devices:'管理短信设备和 4G 网络',contacts:'号码与备注',favorites:'保存的重要短信',ads:'自动识别的广告短信',blacklist:'拦截与归档',settings:'账号与界面偏好'}
 const savedNavOrder = JSON.parse(localStorage.getItem('sms.navOrder') || '[]')
 const navOrder = ref([...savedNavOrder.filter(id => navIds.includes(id)), ...navIds.filter(id => !savedNavOrder.includes(id))])
 const navDragging = ref('')
@@ -21,13 +21,19 @@ const messages = ref([])
 const devices = ref([])
 const contacts = ref([])
 const blacklist = ref([])
+const blacklistSearch = ref('')
+const blacklistMatchFilter = ref('all')
 const selectedConversationKey = ref(null)
 const mobileConversationOpen = ref(false)
 const deviceFilter = ref('all')
 const loading = ref(false)
 const error = ref('')
-const authRequired = ref(false)
-const authTokenDraft = ref('')
+const userSession = ref(sessionStorage.getItem('sms.userSession') || '')
+const currentUser = ref(null)
+const isAdmin = computed(() => currentUser.value?.role === 'admin')
+const authRequired = ref(!userSession.value)
+const loginDraft = ref({username:'admin',password:''})
+const loginError = ref('')
 const composeOpen = ref(false)
 const contactEditorOpen = ref(false)
 const contactOriginalPhone = ref('')
@@ -35,8 +41,14 @@ const contactDraft = ref({phone:'',name:'',note:''})
 const contactError = ref('')
 const blacklistEditorOpen = ref(false)
 const blacklistOriginalPhone = ref('')
-const blacklistDraft = ref({phone:'',label:'',note:''})
+const blacklistDraft = ref({phone:'',match_type:'exact',label:'',note:''})
 const blacklistError = ref('')
+const adRules = ref([])
+const adRuleEditorOpen = ref(false)
+const adRuleOriginalId = ref(null)
+const adRuleDraft = ref({pattern:'',match_type:'contains',field:'body',label:'',enabled:true})
+const adRuleError = ref('')
+const adSearch = ref('')
 const chatDrafts = ref({})
 const chatSending = ref(false)
 const chatError = ref('')
@@ -47,12 +59,24 @@ const integrations = ref({webhooks:[]})
 const hookDraft = ref({label:'', webhook_url:''})
 const dingtalkIntegrations = ref({webhooks:[]})
 const dingtalkDraft = ref({label:'', webhook_url:'', secret:''})
-const apiProfiles = ref(JSON.parse(localStorage.getItem('sms.apiProfiles') || '[]'))
-const apiDraft = ref({label:'', apiBase:'', token:''})
 const savedNotice = ref('')
-const adminPassword = ref('')
-const adminSession = ref(sessionStorage.getItem('sms.adminSession') || '')
+const settingsSection = ref(localStorage.getItem('sms.settingsSection') || 'general')
+const settingsSections = [
+  {id:'general', label:'通用', description:'外观与刷新'},
+  {id:'connection', label:'连接', description:'网关地址'},
+  {id:'account', label:'账号', description:'当前用户与密码'},
+  {id:'notifications', label:'通知', description:'飞书与钉钉机器人', admin:true},
+  {id:'network', label:'网络', description:'设备与 4G 数据网络', admin:true},
+  {id:'security', label:'用户与 API', description:'用户、机器密钥', admin:true}
+]
+const visibleSettingsSections = computed(() => settingsSections.filter(item => !item.admin || isAdmin.value))
+function openSettingsSection(id) {
+  settingsSection.value = id
+  localStorage.setItem('sms.settingsSection', id)
+}
 const adminKeys = ref([])
+const users = ref([])
+const userDraft = ref({username:'',password:''})
 const adminKeyDraft = ref({label:'',scope:'read'})
 const createdApiToken = ref('')
 const adminError = ref('')
@@ -63,7 +87,6 @@ const passwordBusy = ref(false)
 const draft = ref({ device_id: '', phone: '', body: '' })
 const settings = ref({
   apiBase: localStorage.getItem('sms.apiBase') || '',
-  token: localStorage.getItem('sms.token') || '',
   theme: localStorage.getItem('sms.theme') || 'system',
   refresh: Number(localStorage.getItem('sms.refresh') || 5)
 })
@@ -75,7 +98,7 @@ let suppressNavClick = false
 function conversationKey(message) { return `${message.device_id || ''}\u0000${message.phone}` }
 const conversations = computed(() => {
   const byKey = new Map()
-  for (const message of messages.value.filter(message => !message.blacklisted)) {
+  for (const message of messages.value.filter(message => !message.blacklisted && !message.advertisement)) {
     const key = conversationKey(message)
     if (!byKey.has(key)) byKey.set(key, {key, phone:message.phone, device_id:message.device_id, latest:message})
   }
@@ -90,7 +113,7 @@ const chatBody = computed({
   set: value => { chatDrafts.value = {...chatDrafts.value, [selectedConversationKey.value]: value} }
 })
 const conversationMessages = computed(() => messages.value.filter(m =>
-  conversationKey(m) === selectedConversationKey.value
+  !m.blacklisted && !m.advertisement && conversationKey(m) === selectedConversationKey.value
 ))
 const activeDeviceOnline = computed(() => devices.value.some(d =>
   d.device_id === activeConversation.value?.device_id && d.status === 'online'
@@ -98,6 +121,26 @@ const activeDeviceOnline = computed(() => devices.value.some(d =>
 const onlineCount = computed(() => devices.value.filter(d => d.status === 'online').length)
 const favorites = computed(() => messages.value.filter(m => m.favorite))
 const blacklistedMessages = computed(() => messages.value.filter(m => m.blacklisted))
+const advertisementMessages = computed(() => messages.value.filter(m => m.advertisement))
+const visibleAdRules = computed(() => {
+  const keyword = adSearch.value.trim().toLocaleLowerCase('zh-CN')
+  return adRules.value.filter(item => !keyword || [item.pattern,item.label,item.match_type,item.field]
+    .some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(keyword)))
+})
+const blacklistMatchLabels = {exact:'精确匹配',contains:'包含匹配',regex:'正则表达式'}
+const visibleBlacklist = computed(() => {
+  const keyword = blacklistSearch.value.trim().toLocaleLowerCase('zh-CN')
+  return blacklist.value.filter(item => {
+    if (blacklistMatchFilter.value !== 'all' && item.match_type !== blacklistMatchFilter.value) return false
+    if (!keyword) return true
+    return [item.phone,item.label,item.note,blacklistMatchLabels[item.match_type]]
+      .some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(keyword))
+  })
+})
+function blacklistMessagesFor(item) {
+  const matched = Array.isArray(item.matched_phones) ? item.matched_phones : [item.phone]
+  return blacklistedMessages.value.filter(message => matched.includes(message.phone)).slice(0,5)
+}
 const contactByPhone = phone => contacts.value.find(c => c.phone === phone) || null
 const contactName = phone => contactByPhone(phone)?.name || phone
 const contactAvatar = phone => (contactByPhone(phone)?.name || phone || '?').slice(0, 2)
@@ -211,21 +254,31 @@ function startSidebarDrag(event) {
 function apiUrl(path) { return settings.value.apiBase.replace(/\/$/, '') + path }
 async function api(path, options = {}) {
   const headers = { ...(options.body ? {'Content-Type':'application/json'} : {}) }
-  if (settings.value.token) headers.Authorization = `Bearer ${settings.value.token}`
+  if (userSession.value) headers['X-User-Session'] = userSession.value
   const response = await fetch(apiUrl(path), { ...options, headers: {...headers, ...(options.headers || {})} })
   const data = await response.json()
-  if (!response.ok) throw new Error(data.error || `请求失败 ${response.status}`)
+  if (!response.ok) {
+    const exc = new Error(data.error || `请求失败 ${response.status}`)
+    exc.status = response.status
+    throw exc
+  }
   return data
 }
 async function refresh() {
-  if (loading.value) return
+  if (loading.value || !userSession.value) return
   loading.value = true
   try {
-    const [m, d, c, b, i, ding, network] = await Promise.all([api('/api/v1/messages?limit=200'), api('/api/v1/devices'), api('/api/v1/contacts'), api('/api/v1/blacklist'), api('/api/v1/integrations/feishu'), api('/api/v1/integrations/dingtalk'), api('/api/v1/network/4g').catch(exc => ({available:false,enabled:false,interfaces:[],error:exc.message}))])
+    const [m, d, c, b, ads, i, ding, network] = await Promise.all([
+      api('/api/v1/messages?limit=200'), api('/api/v1/devices'), api('/api/v1/contacts'),
+      api('/api/v1/blacklist'), api('/api/v1/ad-rules'), api('/api/v1/integrations/feishu'),
+      api('/api/v1/integrations/dingtalk'),
+      api('/api/v1/network/4g').catch(exc => ({available:false,enabled:false,interfaces:[],error:exc.message}))
+    ])
     messages.value = m.messages
     devices.value = d.devices
     contacts.value = c.contacts
     blacklist.value = b.blacklist
+    adRules.value = ads.rules
     integrations.value = i
     dingtalkIntegrations.value = ding
     fourG.value = network
@@ -235,16 +288,38 @@ async function refresh() {
     authRequired.value = false
   } catch (e) {
     error.value = e.message
-    authRequired.value = e.message === 'invalid bearer token'
+    if (e.status === 401) {
+      authRequired.value = true
+      currentUser.value = null
+      userSession.value = ''
+      sessionStorage.removeItem('sms.userSession')
+    }
   } finally { loading.value = false }
 }
-async function connectWithToken() {
-  const token = authTokenDraft.value.trim()
-  if (!token) return
-  settings.value.token = token
-  localStorage.setItem('sms.token', token)
-  authTokenDraft.value = ''
-  await refresh()
+async function loginUser() {
+  loginError.value = ''
+  try {
+    const response = await fetch(apiUrl('/api/v1/auth/login'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(loginDraft.value)})
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '登录失败')
+    userSession.value = data.session
+    currentUser.value = data.user
+    sessionStorage.setItem('sms.userSession', data.session)
+    loginDraft.value.password = ''
+    authRequired.value = false
+    if (!isAdmin.value && ['notifications','network','security'].includes(settingsSection.value)) settingsSection.value = 'account'
+    await refresh()
+    await loadAdminData()
+  } catch (e) { loginError.value = e.message }
+}
+async function logoutUser() {
+  try { if (userSession.value) await api('/api/v1/auth/logout', {method:'POST'}) } catch (_) {}
+  userSession.value = ''
+  currentUser.value = null
+  users.value = []
+  adminKeys.value = []
+  sessionStorage.removeItem('sms.userSession')
+  authRequired.value = true
 }
 function scrollChatToBottom() {
   nextTick(() => { if (chatHistory.value) chatHistory.value.scrollTop = 0 })
@@ -291,7 +366,7 @@ async function deleteContact(contact) {
 function editBlacklist(phone = '') {
   const item = blacklist.value.find(entry => entry.phone === phone)
   blacklistOriginalPhone.value = item?.phone || ''
-  blacklistDraft.value = {phone:phone || '', label:item?.label || '', note:item?.note || ''}
+  blacklistDraft.value = {phone:phone || '', match_type:item?.match_type || 'exact', label:item?.label || '', note:item?.note || ''}
   blacklistError.value = ''
   blacklistEditorOpen.value = true
 }
@@ -300,7 +375,7 @@ async function saveBlacklist() {
   blacklistError.value = ''
   try {
     await api(`/api/v1/blacklist/${encodeURIComponent(phone)}`, {
-      method:'PUT', body:JSON.stringify({label:blacklistDraft.value.label, note:blacklistDraft.value.note})
+      method:'PUT', body:JSON.stringify({match_type:blacklistDraft.value.match_type, label:blacklistDraft.value.label, note:blacklistDraft.value.note})
     })
     blacklistEditorOpen.value = false
     await refresh()
@@ -312,6 +387,31 @@ async function deleteBlacklist(item) {
     await api(`/api/v1/blacklist/${encodeURIComponent(item.phone)}`, {method:'DELETE'})
     await refresh()
   } catch (e) { error.value = e.message }
+}
+function editAdRule(item = null) {
+  adRuleOriginalId.value = item?.id || null
+  adRuleDraft.value = item ? {pattern:item.pattern,match_type:item.match_type,field:item.field,label:item.label || '',enabled:!!item.enabled}
+    : {pattern:'',match_type:'contains',field:'body',label:'',enabled:true}
+  adRuleError.value = ''
+  adRuleEditorOpen.value = true
+}
+async function saveAdRule() {
+  adRuleError.value = ''
+  try {
+    if (adRuleOriginalId.value) await api(`/api/v1/ad-rules/${adRuleOriginalId.value}`, {method:'PATCH',body:JSON.stringify(adRuleDraft.value)})
+    else await api('/api/v1/ad-rules', {method:'POST',body:JSON.stringify(adRuleDraft.value)})
+    adRuleEditorOpen.value = false
+    await refresh()
+  } catch (e) { adRuleError.value = e.message }
+}
+async function toggleAdRule(item) {
+  try { await api(`/api/v1/ad-rules/${item.id}`, {method:'PATCH',body:JSON.stringify({...item,enabled:!item.enabled})}); await refresh() }
+  catch (e) { error.value = e.message }
+}
+async function deleteAdRule(item) {
+  if (!confirm(`确认删除广告规则“${item.label || item.pattern}”？`)) return
+  try { await api(`/api/v1/ad-rules/${item.id}`, {method:'DELETE'}); await refresh() }
+  catch (e) { error.value = e.message }
 }
 function fmt(value) {
   if (!value) return '—'
@@ -368,9 +468,14 @@ async function saveDeviceLabel(device) {
     await refresh()
   } catch (e) { error.value = e.message }
 }
+async function deleteDevice(device) {
+  if (device.status === 'online') { error.value = '在线设备不能删除，请先断开设备'; return }
+  if (!confirm(`确认删除设备“${device.label || device.imei}”的登记记录？历史短信不会删除。`)) return
+  try { await api(`/api/v1/devices/${encodeURIComponent(device.device_id)}`, {method:'DELETE'}); await refresh() }
+  catch (e) { error.value = e.message }
+}
 async function saveSettings() {
   localStorage.setItem('sms.apiBase', settings.value.apiBase.trim())
-  localStorage.setItem('sms.token', settings.value.token.trim())
   localStorage.setItem('sms.theme', settings.value.theme)
   localStorage.setItem('sms.refresh', String(settings.value.refresh))
   savedNotice.value = '设置已保存'
@@ -378,24 +483,18 @@ async function saveSettings() {
   applyTheme(); schedule(); refresh()
 }
 async function adminRequest(path, options = {}) {
-  const response = await fetch(apiUrl(path), {...options, headers:{'Content-Type':'application/json','X-Admin-Session':adminSession.value}})
+  const response = await fetch(apiUrl(path), {...options, headers:{'Content-Type':'application/json','X-User-Session':userSession.value}})
   const data = await response.json()
   if (!response.ok) throw new Error(data.error || `请求失败 ${response.status}`)
   return data
 }
-async function loadAdminKeys() {
-  if (!adminSession.value) return
-  try { adminKeys.value = (await adminRequest('/api/v1/admin/keys')).keys; adminError.value = '' }
-  catch(e) { adminSession.value = ''; sessionStorage.removeItem('sms.adminSession'); adminError.value = e.message }
-}
-async function loginAdmin() {
-  adminError.value = ''
+async function loadAdminData() {
+  if (!isAdmin.value) { adminKeys.value = []; users.value = []; return }
   try {
-    const response = await fetch(apiUrl('/api/v1/admin/login'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password:adminPassword.value})})
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.error || '登录失败')
-    adminSession.value = data.session; sessionStorage.setItem('sms.adminSession',data.session)
-    adminPassword.value = ''; await loadAdminKeys()
+    const [keyResult,userResult] = await Promise.all([adminRequest('/api/v1/admin/keys'),adminRequest('/api/v1/admin/users')])
+    adminKeys.value = keyResult.keys
+    users.value = userResult.users
+    adminError.value = ''
   } catch(e) { adminError.value = e.message }
 }
 async function changeAdminPassword() {
@@ -403,19 +502,42 @@ async function changeAdminPassword() {
   if (passwordDraft.value.next !== passwordDraft.value.confirm) {
     passwordError.value = '两次输入的新密码不一致'; return
   }
-  if (passwordDraft.value.next.length < 12 || passwordDraft.value.next.length > 128) {
-    passwordError.value = '新密码须为 12–128 个字符'; return
+  if (passwordDraft.value.next.length < 8 || passwordDraft.value.next.length > 128) {
+    passwordError.value = '新密码须为 8–128 个字符'; return
   }
   passwordBusy.value = true
   try {
-    await adminRequest('/api/v1/admin/password', {method:'PUT', body:JSON.stringify({
+    await api('/api/v1/auth/password', {method:'PUT', body:JSON.stringify({
       current_password:passwordDraft.value.current, new_password:passwordDraft.value.next
     })})
     passwordDraft.value = {current:'', next:'', confirm:''}
-    adminSession.value = ''; sessionStorage.removeItem('sms.adminSession')
-    createdApiToken.value = ''; passwordNotice.value = '密码已更新，请用新密码重新登录'
+    passwordNotice.value = '密码已更新，请重新登录'
+    await logoutUser()
   } catch(e) { passwordError.value = e.message }
   finally { passwordBusy.value = false }
+}
+async function createUser() {
+  adminError.value = ''
+  try {
+    const result = await adminRequest('/api/v1/admin/users', {method:'POST',body:JSON.stringify(userDraft.value)})
+    users.value = result.users
+    userDraft.value = {username:'',password:''}
+  } catch(e) { adminError.value = e.message }
+}
+async function toggleUser(item) {
+  try { users.value = (await adminRequest(`/api/v1/admin/users/${encodeURIComponent(item.username)}`, {method:'PATCH',body:JSON.stringify({enabled:!item.enabled})})).users }
+  catch(e) { adminError.value = e.message }
+}
+async function resetUserPassword(item) {
+  const password = prompt(`为 ${item.username} 设置新密码（至少 8 个字符）`)
+  if (password === null) return
+  try { await adminRequest(`/api/v1/admin/users/${encodeURIComponent(item.username)}/password`, {method:'PUT',body:JSON.stringify({password})}); savedNotice.value = '用户密码已重置' }
+  catch(e) { adminError.value = e.message }
+}
+async function deleteUser(item) {
+  if (!confirm(`确认删除用户“${item.username}”？`)) return
+  try { users.value = (await adminRequest(`/api/v1/admin/users/${encodeURIComponent(item.username)}`, {method:'DELETE'})).users }
+  catch(e) { adminError.value = e.message }
 }
 async function createAdminKey() {
   adminError.value = ''; createdApiToken.value = ''
@@ -450,28 +572,6 @@ async function deleteAdminKey(item) {
   if (!confirm(`确认撤销“${item.label}”？使用它的程序将立即失去访问权限。`)) return
   try { adminKeys.value = (await adminRequest(`/api/v1/admin/keys/${item.id}`, {method:'DELETE'})).keys }
   catch(e) { adminError.value = e.message }
-}
-function persistApiProfiles() { localStorage.setItem('sms.apiProfiles', JSON.stringify(apiProfiles.value)) }
-function newProfileId() { return `${Date.now()}-${Math.random().toString(36).slice(2)}` }
-function addApiProfile() {
-  if (!apiDraft.value.label.trim()) { error.value = '请填写 API 配置备注'; return }
-  apiProfiles.value.push({id:newProfileId(), ...apiDraft.value})
-  persistApiProfiles(); apiDraft.value = {label:'',apiBase:'',token:''}
-}
-function useApiProfile(profile) {
-  settings.value.apiBase = profile.apiBase
-  settings.value.token = profile.token
-  saveSettings()
-}
-function renameApiProfile(profile) {
-  const label = prompt('输入 API 配置备注', profile.label)
-  if (label === null || !label.trim()) return
-  profile.label = label.trim()
-  persistApiProfiles()
-}
-function deleteApiProfile(id) {
-  if (!confirm('确认删除这条 API 配置？')) return
-  apiProfiles.value = apiProfiles.value.filter(x => x.id !== id); persistApiProfiles()
 }
 async function addHook() {
   integrations.value = await api('/api/v1/integrations/feishu', {
@@ -525,7 +625,25 @@ function applyTheme() { document.documentElement.dataset.theme = settings.value.
 function schedule() { clearInterval(timer); timer = setInterval(refresh, Math.max(3, settings.value.refresh) * 1000) }
 watch([selectedConversationKey, () => conversationMessages.value[0]?.id], scrollChatToBottom, {flush:'post', immediate:true})
 watch(deviceFilter, () => { if (!visibleConversations.value.some(c => c.key === selectedConversationKey.value)) selectedConversationKey.value = visibleConversations.value[0]?.key || null })
-onMounted(() => { applyTheme(); refresh(); schedule(); loadAdminKeys() })
+onMounted(async () => {
+  applyTheme(); schedule()
+  if (!userSession.value) return
+  try {
+    currentUser.value = (await api('/api/v1/auth/me')).user
+    authRequired.value = false
+    if (!isAdmin.value && ['notifications','network','security'].includes(settingsSection.value)) {
+      settingsSection.value = 'account'
+      localStorage.setItem('sms.settingsSection', 'account')
+    }
+    await refresh()
+    await loadAdminData()
+  } catch (_) {
+    userSession.value = ''
+    currentUser.value = null
+    sessionStorage.removeItem('sms.userSession')
+    authRequired.value = true
+  }
+})
 onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.removeEventListener('pointermove', moveNavPointer); window.removeEventListener('pointerup', stopNavPointer) })
 </script>
 
@@ -538,9 +656,10 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
           <svg v-else-if="id==='devices'" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2.8"/><path d="M10 5.5h4M10 18.3h4"/><circle cx="12" cy="12" r="2.2"/></svg>
           <svg v-else-if="id==='contacts'" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="15" height="18" rx="2.5"/><path d="M5 7H3M5 12H3M5 17H3"/><circle cx="12.5" cy="9" r="2"/><path d="M8.8 16.5c.5-1.9 1.7-2.8 3.7-2.8s3.2.9 3.7 2.8"/></svg>
           <svg v-else-if="id==='favorites'" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 3.1 6.4 7.1 1-5.1 5 .9 7-6-3.3-6 3.3.9-7-5.1-5 7.1-1z"/></svg>
+          <svg v-else-if="id==='ads'" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v10H4z"/><path d="M7 4.5v3M17 4.5v3M7 12h4M7 15h7"/></svg>
           <svg v-else-if="id==='blacklist'" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6 18 12-12"/></svg>
           <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 2.9h3.4l.5 2.1c.6.2 1.2.4 1.7.7l1.9-1.1 2.4 2.4-1.1 1.9c.3.5.5 1.1.7 1.7l2.1.5v3.4l-2.1.5c-.2.6-.4 1.2-.7 1.7l1.1 1.9-2.4 2.4-1.9-1.1c-.5.3-1.1.5-1.7.7l-.5 2.1h-3.4l-.5-2.1c-.6-.2-1.2-.4-1.7-.7l-1.9 1.1-2.4-2.4 1.1-1.9c-.3-.5-.5-1.1-.7-1.7l-2.1-.5v-3.4l2.1-.5c.2-.6.4-1.2.7-1.7L3.8 7l2.4-2.4 1.9 1.1c.5-.3 1.1-.5 1.7-.7z"/><circle cx="12" cy="12.8" r="3.1"/></svg>
-          <span class="nav-copy"><span>{{ navLabels[id] }}</span><small v-if="view===id">{{ navDescriptions[id] }}</small></span><b v-if="id==='messages'">{{ messages.length-blacklistedMessages.length }}</b><i v-else-if="id==='devices'" :class="onlineCount?'ok':''">{{ onlineCount }}</i><i v-else-if="id==='contacts'">{{ contacts.length }}</i><i v-else-if="id==='favorites'">{{ favorites.length }}</i><i v-else-if="id==='blacklist'">{{ blacklistedMessages.length }}</i><span class="nav-grip" aria-hidden="true">⋮⋮</span>
+          <span class="nav-copy"><span>{{ navLabels[id] }}</span><small v-if="view===id">{{ navDescriptions[id] }}</small></span><b v-if="id==='messages'">{{ messages.length-blacklistedMessages.length-advertisementMessages.length }}</b><i v-else-if="id==='devices'" :class="onlineCount?'ok':''">{{ onlineCount }}</i><i v-else-if="id==='contacts'">{{ contacts.length }}</i><i v-else-if="id==='favorites'">{{ favorites.length }}</i><i v-else-if="id==='ads'">{{ advertisementMessages.length }}</i><i v-else-if="id==='blacklist'">{{ blacklistedMessages.length }}</i><span class="nav-grip" aria-hidden="true">⋮⋮</span>
         </button>
       </nav>
       <div class="sidebar-foot">
@@ -550,8 +669,8 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
       <div class="sidebar-resizer" role="separator" aria-label="拖动调整菜单栏宽度" aria-orientation="vertical" @pointerdown="startSidebarDrag"></div>
     </aside>
 
-    <main v-if="authRequired && view!=='settings'" class="auth-gate">
-      <div class="auth-card"><span class="auth-symbol" aria-hidden="true">✉</span><h1>连接短信网关</h1><p>当前浏览器尚未配置有效的 API Token。每个浏览器需要分别保存一次，才能查看短信和设备。</p><form @submit.prevent="connectWithToken"><label for="gateway-token">API Token</label><input id="gateway-token" v-model="authTokenDraft" type="password" autocomplete="off" placeholder="输入服务器上的 API Token" required><button class="primary" type="submit">连接</button></form><small>Token 保存在当前浏览器。可从 104 服务器的 <code>/home/ubuntu-server/air780/.env.docker</code> 获取。</small></div>
+    <main v-if="authRequired" class="auth-gate">
+      <div class="auth-card"><span class="auth-symbol" aria-hidden="true">✉</span><h1>登录短信中心</h1><p>使用管理员分配的账号和密码登录。管理员可在“设置 → 用户与 API”中管理普通用户。</p><form @submit.prevent="loginUser"><label for="login-user">账号</label><input id="login-user" v-model.trim="loginDraft.username" autocomplete="username" required placeholder="用户名"><label for="login-password">密码</label><input id="login-password" v-model="loginDraft.password" type="password" autocomplete="current-password" required placeholder="密码"><button class="primary" type="submit">登录</button></form><p v-if="loginError" class="form-error">{{ loginError }}</p><small>首次安装默认管理员为 <code>admin</code>；上线后应立即修改管理员密码。</small></div>
     </main>
     <template v-else-if="view==='messages'">
       <section class="list-pane">
@@ -604,7 +723,7 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
             <span class="phone-status large" :aria-label="`${deviceSignalLabel(d)}，${deviceDataLabel(d)}`"><span class="signal-bars large" :class="{on:deviceSignalBars(d)>0}" aria-hidden="true"><i v-for="bar in 4" :key="bar" :class="{active:deviceSignalBars(d)!==null && bar<=deviceSignalBars(d)}"></i></span><span class="network-mark" :class="{connected:deviceNetworkConnected(d)}" aria-hidden="true">4G</span></span>
             <div><strong>{{ deviceDataLabel(d) }}</strong><p>{{ deviceSignalLabel(d) }}</p><p v-if="networkForDevice(d)">{{ networkForDevice(d).addresses?.join(', ') || '等待获取地址' }}</p></div>
           </div>
-          <div class="device-actions"><span :class="['device-status',d.status!=='online'?'offline':'']">{{ d.status==='online'?'在线':'离线' }}</span><button v-if="editingDevice!==d.device_id" class="text-button" type="button" @click="beginRename(d)">{{ d.label?'修改备注':'添加备注' }}</button><button v-if="networkForDevice(d)" type="button" class="primary compact" :disabled="!fourG.available || fourGBusy" @click="toggleFourG(d)">{{ fourGBusy?'切换中…':networkForDevice(d).enabled?'关闭 4G':'开启 4G' }}</button></div>
+          <div class="device-actions"><span :class="['device-status',d.status!=='online'?'offline':'']">{{ d.status==='online'?'在线':'离线' }}</span><button v-if="editingDevice!==d.device_id" class="text-button" type="button" @click="beginRename(d)">{{ d.label?'修改备注':'添加备注' }}</button><button v-if="isAdmin && d.status!=='online'" type="button" class="text-button danger" @click="deleteDevice(d)">删除设备</button><button v-if="isAdmin && networkForDevice(d)" type="button" class="primary compact" :disabled="!fourG.available || fourGBusy" @click="toggleFourG(d)">{{ fourGBusy?'切换中…':networkForDevice(d).enabled?'关闭 4G':'开启 4G' }}</button></div>
         </div>
         <p v-if="!devices.length" class="empty">暂无设备</p><p v-if="fourGError" class="form-error">{{ fourGError }}</p>
       </section>
@@ -617,30 +736,89 @@ onBeforeUnmount(() => { clearInterval(timer); stopSidebarDrag?.(); window.remove
         <div v-if="!favorites.length" class="empty">暂无收藏。在短信气泡下方点击 ☆ 即可收藏。</div>
         <div v-for="m in favorites" :key="m.id" class="favorite-row"><button type="button" class="favorite-open" @click="openFavorite(m)"><strong>{{ contactName(m.phone) }}</strong><time>{{ fmt(m.created_at) }}</time><p>{{ m.body }}</p><small>{{ m.phone }} · {{ deviceName(m.device_id) }}</small></button><button type="button" class="favorite-toggle saved" aria-label="取消收藏短信" title="取消收藏" @click="toggleFavorite(m)">★</button></div>
       </section>
-      <section v-else-if="view==='blacklist'" class="blacklist-page">
-        <div class="blacklist-notice">黑名单号码发来的新短信会保存在这里，且不会推送到飞书、钉钉或通用 Webhook。移出黑名单不会删除已归档短信。</div>
-        <div v-if="!blacklist.length" class="empty">黑名单为空</div>
-        <div v-for="item in blacklist" :key="item.phone" class="blacklist-card"><div class="blacklist-head"><span class="conversation-avatar blocked">⊘</span><div class="contact-details"><strong>{{ item.label || item.phone }}</strong><p>{{ item.phone }} · {{ item.message_count || 0 }} 条已拦截短信</p><small v-if="item.note">{{ item.note }}</small></div><button class="text-button" type="button" @click="editBlacklist(item.phone)">编辑</button><button class="text-button danger" type="button" @click="deleteBlacklist(item)">移出</button></div><div class="blacklist-messages"><div v-for="m in blacklistedMessages.filter(message => message.phone===item.phone).slice(0,5)" :key="m.id" class="blacklist-message"><p>{{ m.body }}</p><small>{{ fmt(m.created_at) }} · {{ deviceName(m.device_id) }}</small></div><div v-if="!blacklistedMessages.some(message => message.phone===item.phone)" class="list-empty">尚未收到黑名单短信</div></div></div>
-        <button class="page-add-fab" type="button" aria-label="添加黑名单号码" title="添加号码" @click="editBlacklist()">＋</button>
+      <section v-else-if="view==='ads'" class="ads-page">
+        <div class="blacklist-notice">广告过滤器先检查黑名单，再按启用的广告规则匹配短信内容或发送号码。命中后只归档到这里，不进入普通会话，也不推送机器人或 Webhook。</div>
+        <div class="blacklist-tools"><input v-model="adSearch" type="search" placeholder="搜索广告规则…"><span>{{ visibleAdRules.length }} 条规则 · {{ advertisementMessages.length }} 条广告</span></div>
+        <div class="ad-rule-list"><div v-for="item in visibleAdRules" :key="item.id" class="config-item"><span :class="['status-dot',!item.enabled?'bad':'']"></span><div><strong>{{ item.label || item.pattern }}</strong><p>{{ item.pattern }} · {{ item.match_type==='regex'?'正则':'包含' }} · {{ item.field==='body'?'短信内容':item.field==='phone'?'发送号码':'号码+内容' }} · {{ item.enabled?'已启用':'已停用' }}</p></div><button class="text-button" type="button" @click="toggleAdRule(item)">{{ item.enabled?'停用':'启用' }}</button><button class="text-button" type="button" @click="editAdRule(item)">编辑</button><button class="text-button danger" type="button" @click="deleteAdRule(item)">删除</button></div><div v-if="!visibleAdRules.length" class="list-empty">暂无符合条件的广告规则</div></div>
+        <div class="ads-messages"><h3>已过滤广告</h3><div v-for="m in advertisementMessages" :key="m.id" class="blacklist-message"><strong>{{ m.phone }}</strong><p>{{ m.body }}</p><small>{{ fmt(m.created_at) }} · {{ deviceName(m.device_id) }}</small></div><div v-if="!advertisementMessages.length" class="empty">暂无广告短信</div></div>
+        <button class="page-add-fab" type="button" aria-label="添加广告规则" title="添加广告规则" @click="editAdRule()">＋</button>
       </section>
-      <form v-else class="settings-form" @submit.prevent="saveSettings">
-        <fieldset><legend>API 配置</legend><div class="setting-description">保存常用网关连接。备注用于区分环境，Token 只保存在当前浏览器且不会回显。</div><div class="config-list"><div v-for="p in apiProfiles" :key="p.id" class="config-item"><div><strong>{{ p.label }}</strong><p>{{ p.apiBase || '当前地址' }} · Token {{ p.token?'已配置':'未配置' }}</p></div><button type="button" class="text-button" @click="renameApiProfile(p)">改备注</button><button type="button" class="text-button" @click="useApiProfile(p)">使用</button><button type="button" class="text-button danger" @click="deleteApiProfile(p.id)">删除</button></div><div v-if="!apiProfiles.length" class="list-empty">暂无已保存配置</div></div><div class="add-config"><input v-model="apiDraft.label" placeholder="备注，例如：本机网关"><input v-model="apiDraft.apiBase" placeholder="服务地址，留空为当前地址"><input v-model="apiDraft.token" type="password" autocomplete="new-password" placeholder="访问 Token，可留空"><button class="primary" type="button" @click="addApiProfile">保存到列表</button></div><label>刷新间隔<select v-model.number="settings.refresh"><option :value="3">3 秒</option><option :value="5">5 秒</option><option :value="10">10 秒</option><option :value="30">30 秒</option></select></label></fieldset>
-        <fieldset><legend>管理员与 API 凭据</legend><div class="setting-description">使用 admin 账号管理分配给其他程序的 API 凭据。每把凭据可单独备注和撤销；密钥只在创建时显示一次。</div>
-          <div v-if="!adminSession" class="add-config"><input value="admin" aria-label="管理员账号" disabled><input v-model="adminPassword" type="password" autocomplete="current-password" placeholder="管理员密码"><button class="primary" type="button" @click="loginAdmin">登录管理</button></div>
-          <template v-else><div class="config-list"><div v-for="item in adminKeys" :key="item.id" class="config-item"><div><strong>{{ item.label }}</strong><p>{{ item.scope==='read'?'只读':'读写' }} · {{ item.created_at }}</p></div><button type="button" class="text-button" @click="renameAdminKey(item)">改备注</button><button type="button" class="text-button danger" @click="deleteAdminKey(item)">撤销</button></div><div v-if="!adminKeys.length" class="list-empty">暂无已分配凭据</div></div><div class="add-config"><input v-model="adminKeyDraft.label" maxlength="80" placeholder="用途备注，例如：报表系统"><select v-model="adminKeyDraft.scope"><option value="read">只读</option><option value="write">读写</option></select><button type="button" class="primary" @click="createAdminKey">创建 API 凭据</button></div><div v-if="createdApiToken" class="created-token"><strong>新凭据（仅显示一次，请立即保存）</strong><input :value="createdApiToken" readonly aria-label="新 API 凭据"><button type="button" @click="copyAdminKey">复制</button></div><div class="admin-password"><strong>修改 admin 密码</strong><div class="admin-password-fields" @keydown.enter.prevent="changeAdminPassword"><input v-model="passwordDraft.current" type="password" autocomplete="current-password" placeholder="当前密码" aria-label="当前 admin 密码"><input v-model="passwordDraft.next" type="password" autocomplete="new-password" placeholder="新密码（至少 12 个字符）" aria-label="新 admin 密码"><input v-model="passwordDraft.confirm" type="password" autocomplete="new-password" placeholder="再次输入新密码" aria-label="确认新 admin 密码"><button type="button" class="primary" :disabled="passwordBusy || !passwordDraft.current || !passwordDraft.next || !passwordDraft.confirm" @click="changeAdminPassword">{{ passwordBusy?'修改中…':'修改密码' }}</button></div><p v-if="passwordError" class="form-error">{{ passwordError }}</p></div><button type="button" class="text-button" @click="adminSession='';sessionStorage.removeItem('sms.adminSession');createdApiToken=''">退出 admin</button></template><p v-if="passwordNotice" class="saved-notice">{{ passwordNotice }}</p><p v-if="adminError" class="form-error">{{ adminError }}</p>
-        </fieldset>
-        <fieldset><legend>飞书机器人</legend><div class="setting-description">可配置多个飞书群机器人，网关会向所有已启用项推送短信和设备状态。完整 Hook 作为机密保存在网关本机。</div><div class="config-list"><div v-for="item in integrations.webhooks" :key="item.id" class="config-item"><span :class="['status-dot',!item.enabled?'bad':'']"></span><div><strong>{{ item.label }}</strong><p>{{ item.masked }} · {{ item.enabled?'已启用':'已停用' }}</p></div><button type="button" class="text-button" @click="renameHook(item)">改备注</button><button type="button" class="text-button" @click="toggleHook(item)">{{ item.enabled?'停用':'启用' }}</button><button type="button" class="text-button danger" @click="removeHook(item)">删除</button></div><div v-if="!integrations.webhooks.length" class="list-empty">暂无飞书机器人</div></div><div class="add-config"><input v-model="hookDraft.label" placeholder="备注，例如：客服通知群"><input v-model="hookDraft.webhook_url" type="password" autocomplete="new-password" placeholder="飞书机器人 Hook 地址"><button class="primary" type="button" @click="addHook">添加机器人</button></div></fieldset>
-        <fieldset><legend>钉钉机器人</legend><div class="setting-description">可配置多个钉钉群自定义机器人，向所有已启用项推送短信和设备状态。若机器人启用了“加签”，请填写以 SEC 开头的密钥；Webhook 和密钥保存在网关本机。</div><div class="config-list"><div v-for="item in dingtalkIntegrations.webhooks" :key="item.id" class="config-item"><span :class="['status-dot',!item.enabled?'bad':'']"></span><div><strong>{{ item.label }}</strong><p>{{ item.masked }} · {{ item.signed?'已加签':'未加签' }} · {{ item.enabled?'已启用':'已停用' }}</p></div><button type="button" class="text-button" @click="renameDingtalkHook(item)">改备注</button><button type="button" class="text-button" @click="toggleDingtalkHook(item)">{{ item.enabled?'停用':'启用' }}</button><button type="button" class="text-button danger" @click="removeDingtalkHook(item)">删除</button></div><div v-if="!dingtalkIntegrations.webhooks.length" class="list-empty">暂无钉钉机器人</div></div><div class="add-config"><input v-model="dingtalkDraft.label" placeholder="备注，例如：运维通知群"><input v-model="dingtalkDraft.webhook_url" type="password" autocomplete="new-password" placeholder="钉钉机器人 Webhook 地址"><input v-model="dingtalkDraft.secret" type="password" autocomplete="new-password" placeholder="加签密钥（可留空）"><button class="primary" type="button" @click="addDingtalkHook">添加机器人</button></div></fieldset>
-        <fieldset><legend>外观</legend><label>主题<select v-model="settings.theme" @change="applyTheme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label></fieldset>
-        <button class="primary" type="submit">保存界面设置</button><span v-if="savedNotice" class="saved-notice">{{ savedNotice }}</span><p class="hint">API 配置保存在当前浏览器；飞书和钉钉机器人列表保存在网关本机。</p>
-      </form>
+      <section v-else-if="view==='blacklist'" class="blacklist-page">
+        <div class="blacklist-notice">黑名单支持精确号码、包含匹配和正则表达式。命中的新短信会保存归档，但不会推送到飞书、钉钉或通用 Webhook。</div>
+        <div class="blacklist-tools"><input v-model="blacklistSearch" type="search" placeholder="搜索规则、备注…" aria-label="搜索黑名单"><select v-model="blacklistMatchFilter" aria-label="按匹配方式筛选"><option value="all">全部匹配方式</option><option value="exact">精确匹配</option><option value="contains">包含匹配</option><option value="regex">正则表达式</option></select><span>{{ visibleBlacklist.length }}/{{ blacklist.length }}</span></div>
+        <div v-if="!blacklist.length" class="empty">黑名单为空</div>
+        <div v-else-if="!visibleBlacklist.length" class="empty">没有符合当前搜索条件的黑名单规则</div>
+        <div v-for="item in visibleBlacklist" :key="item.phone" class="blacklist-card"><div class="blacklist-head"><span class="conversation-avatar blocked">⊘</span><div class="contact-details"><strong>{{ item.label || item.phone }}</strong><p><span class="blacklist-match-badge">{{ blacklistMatchLabels[item.match_type] || '精确匹配' }}</span>{{ item.phone }} · {{ item.message_count || 0 }} 条已拦截短信</p><small v-if="item.note">{{ item.note }}</small></div><button class="text-button" type="button" @click="editBlacklist(item.phone)">编辑</button><button class="text-button danger" type="button" @click="deleteBlacklist(item)">移出</button></div><div class="blacklist-messages"><div v-for="m in blacklistMessagesFor(item)" :key="m.id" class="blacklist-message"><p>{{ m.body }}</p><small>{{ fmt(m.created_at) }} · {{ deviceName(m.device_id) }}</small></div><div v-if="!blacklistMessagesFor(item).length" class="list-empty">尚未收到命中此规则的黑名单短信</div></div></div>
+        <button class="page-add-fab" type="button" aria-label="添加黑名单规则" title="添加规则" @click="editBlacklist()">＋</button>
+      </section>
+      <section v-else class="settings-page" aria-label="设置">
+        <header class="settings-title"><div><h1>设置</h1><p>只显示当前类别，减少无关配置干扰。</p></div></header>
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="设置分类">
+            <button v-for="item in visibleSettingsSections" :key="item.id" type="button" :class="{active:settingsSection===item.id}" @click="openSettingsSection(item.id)"><strong>{{ item.label }}</strong><small>{{ item.description }}</small></button>
+          </nav>
+          <div class="settings-content">
+            <template v-if="settingsSection==='general'">
+              <div class="settings-section-head"><h2>通用</h2><p>只影响当前浏览器的显示和自动刷新。</p></div>
+              <div class="settings-group">
+                <div class="setting-row"><div><strong>主题</strong><p>选择浅色、深色或跟随操作系统。</p></div><select v-model="settings.theme" @change="applyTheme"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div>
+                <div class="setting-row"><div><strong>刷新间隔</strong><p>短信、设备和通知状态的自动刷新频率。</p></div><select v-model.number="settings.refresh"><option :value="3">3 秒</option><option :value="5">5 秒</option><option :value="10">10 秒</option><option :value="30">30 秒</option></select></div>
+              </div>
+              <div class="settings-actions"><button class="primary" type="button" @click="saveSettings">保存通用设置</button><span v-if="savedNotice" class="saved-notice">{{ savedNotice }}</span></div>
+            </template>
+
+            <template v-else-if="settingsSection==='connection'">
+              <div class="settings-section-head"><h2>连接</h2><p>网页登录使用账号密码，不再要求用户管理 API Token。</p></div>
+              <div class="settings-group"><div class="setting-row wide"><div><strong>服务地址</strong><p>留空表示使用当前网页所在地址。</p></div><input v-model="settings.apiBase" placeholder="例如：http://192.168.100.7:8787"></div></div>
+              <div class="settings-actions"><button class="primary" type="button" @click="saveSettings">保存连接地址</button><span v-if="savedNotice" class="saved-notice">{{ savedNotice }}</span></div>
+            </template>
+
+            <template v-else-if="settingsSection==='account'">
+              <div class="settings-section-head"><h2>账号</h2><p>当前登录：{{ currentUser?.username }} · {{ isAdmin?'管理员':'普通用户' }}</p></div>
+              <div class="settings-group"><div class="setting-row"><div><strong>退出登录</strong><p>清除当前浏览器会话。</p></div><button type="button" class="contact-edit" @click="logoutUser">退出</button></div></div>
+              <div class="settings-subsection"><div class="settings-section-head compact-head"><h3>修改密码</h3><p>修改后当前会话会失效，需要重新登录。</p></div><div class="admin-password-fields" @keydown.enter.prevent="changeAdminPassword"><input v-model="passwordDraft.current" type="password" autocomplete="current-password" placeholder="当前密码"><input v-model="passwordDraft.next" type="password" autocomplete="new-password" placeholder="新密码（至少 8 个字符）"><input v-model="passwordDraft.confirm" type="password" autocomplete="new-password" placeholder="再次输入新密码"><button type="button" class="primary" :disabled="passwordBusy || !passwordDraft.current || !passwordDraft.next || !passwordDraft.confirm" @click="changeAdminPassword">{{ passwordBusy?'修改中…':'修改密码' }}</button></div><p v-if="passwordError" class="form-error">{{ passwordError }}</p><p v-if="passwordNotice" class="saved-notice">{{ passwordNotice }}</p></div>
+            </template>
+
+            <template v-else-if="settingsSection==='notifications'">
+              <div class="settings-section-head"><h2>通知</h2><p>短信和设备状态可同时推送到多个群。机器人密钥保存在网关本机。</p></div>
+              <div class="settings-subsection first"><div class="integration-heading"><div><strong>飞书机器人</strong><p>适合短信提醒、设备上下线和异常通知。</p></div><span>{{ integrations.webhooks.filter(x=>x.enabled).length }}/{{ integrations.webhooks.length }} 已启用</span></div><div class="config-list"><div v-for="item in integrations.webhooks" :key="item.id" class="config-item"><span :class="['status-dot',!item.enabled?'bad':'']"></span><div><strong>{{ item.label }}</strong><p>{{ item.masked }} · {{ item.enabled?'已启用':'已停用' }}</p></div><button type="button" class="text-button" @click="toggleHook(item)">{{ item.enabled?'停用':'启用' }}</button><button type="button" class="text-button" @click="renameHook(item)">改备注</button><button type="button" class="text-button danger" @click="removeHook(item)">删除</button></div><div v-if="!integrations.webhooks.length" class="list-empty">暂无飞书机器人</div></div><div class="add-config settings-add two-plus"><input v-model="hookDraft.label" placeholder="备注，例如：客服通知群"><input v-model="hookDraft.webhook_url" type="password" autocomplete="new-password" placeholder="飞书机器人 Hook 地址"><button class="primary" type="button" @click="addHook">添加</button></div></div>
+              <div class="settings-subsection"><div class="integration-heading"><div><strong>钉钉机器人</strong><p>支持自定义机器人加签，密钥可留空。</p></div><span>{{ dingtalkIntegrations.webhooks.filter(x=>x.enabled).length }}/{{ dingtalkIntegrations.webhooks.length }} 已启用</span></div><div class="config-list"><div v-for="item in dingtalkIntegrations.webhooks" :key="item.id" class="config-item"><span :class="['status-dot',!item.enabled?'bad':'']"></span><div><strong>{{ item.label }}</strong><p>{{ item.masked }} · {{ item.signed?'已加签':'未加签' }} · {{ item.enabled?'已启用':'已停用' }}</p></div><button type="button" class="text-button" @click="toggleDingtalkHook(item)">{{ item.enabled?'停用':'启用' }}</button><button type="button" class="text-button" @click="renameDingtalkHook(item)">改备注</button><button type="button" class="text-button danger" @click="removeDingtalkHook(item)">删除</button></div><div v-if="!dingtalkIntegrations.webhooks.length" class="list-empty">暂无钉钉机器人</div></div><div class="add-config settings-add"><input v-model="dingtalkDraft.label" placeholder="备注，例如：运维通知群"><input v-model="dingtalkDraft.webhook_url" type="password" autocomplete="new-password" placeholder="钉钉机器人 Webhook 地址"><input v-model="dingtalkDraft.secret" type="password" autocomplete="new-password" placeholder="加签密钥（可留空）"><button class="primary" type="button" @click="addDingtalkHook">添加</button></div></div>
+            </template>
+
+            <template v-else-if="settingsSection==='network'">
+              <div class="settings-section-head"><h2>网络</h2><p>4G 是设备能力，不在设置页重复提供危险开关；这里只展示状态并跳转到设备管理。</p></div>
+              <div class="settings-group"><div class="setting-row"><div><strong>4G 控制服务</strong><p>{{ fourG.available ? '宿主机 4G 控制服务可用' : '当前未安装或不可用' }}</p></div><span :class="['settings-status',fourG.available?'ok':'']">{{ fourG.available?'可用':'不可用' }}</span></div><div class="setting-row"><div><strong>已登记设备</strong><p>在线 {{ onlineCount }} 台，共 {{ devices.length }} 台。</p></div><button type="button" class="contact-edit" @click="view='devices'">前往设备管理</button></div></div>
+              <div v-if="fourG.interfaces?.length" class="network-summary"><div v-for="item in fourG.interfaces" :key="item.interface" class="network-summary-row"><div><strong>{{ deviceName(item.device_id) }}</strong><p>{{ item.interface }} · {{ item.addresses?.join(', ') || '无地址' }}</p></div><span :class="['settings-status',item.enabled&&item.addresses?.length?'ok':'']">{{ item.enabled ? (item.addresses?.length?'已连接':'已开启') : '已关闭' }}</span></div></div>
+            </template>
+
+            <template v-else-if="settingsSection==='security' && isAdmin">
+              <div class="settings-section-head"><h2>用户与 API</h2><p>网页用户用账号密码；API 凭据只留给外部程序和自动化，不用于网页登录。</p></div>
+              <div class="settings-subsection first"><div class="integration-heading"><div><strong>用户</strong><p>管理员账号受保护；普通 user 可停用、重置密码或删除。</p></div><span>{{ users.filter(x=>x.enabled).length }}/{{ users.length }} 已启用</span></div><div class="config-list"><div v-for="item in users" :key="item.username" class="config-item"><span :class="['status-dot',!item.enabled?'bad':'']"></span><div><strong>{{ item.username }}</strong><p>{{ item.role==='admin'?'管理员':'普通用户' }} · {{ item.enabled?'已启用':'已停用' }}</p></div><button v-if="item.role!=='admin'" type="button" class="text-button" @click="toggleUser(item)">{{ item.enabled?'停用':'启用' }}</button><button type="button" class="text-button" @click="resetUserPassword(item)">重置密码</button><button v-if="item.role!=='admin'" type="button" class="text-button danger" @click="deleteUser(item)">删除</button></div></div><div class="add-config settings-add two-plus"><input v-model.trim="userDraft.username" maxlength="32" placeholder="新用户名"><input v-model="userDraft.password" type="password" autocomplete="new-password" placeholder="初始密码（至少 8 位）"><button class="primary" type="button" @click="createUser">创建 user</button></div></div>
+              <div class="settings-subsection"><div class="integration-heading"><div><strong>机器 API 凭据</strong><p>仅供 ERP、Webhook 调用方或自动化脚本使用。</p></div></div><div class="config-list"><div v-for="item in adminKeys" :key="item.id" class="config-item"><div><strong>{{ item.label }}</strong><p>{{ item.scope==='read'?'只读':'读写' }} · {{ item.created_at }}</p></div><button type="button" class="text-button" @click="renameAdminKey(item)">改备注</button><button type="button" class="text-button danger" @click="deleteAdminKey(item)">撤销</button></div><div v-if="!adminKeys.length" class="list-empty">暂无机器 API 凭据</div></div><div class="add-config settings-add two-plus"><input v-model="adminKeyDraft.label" maxlength="80" placeholder="用途备注，例如：ERP接口"><select v-model="adminKeyDraft.scope"><option value="read">只读</option><option value="write">读写</option></select><button type="button" class="primary" @click="createAdminKey">创建凭据</button></div><div v-if="createdApiToken" class="created-token"><strong>新凭据仅显示一次，请立即保存</strong><input :value="createdApiToken" readonly aria-label="新 API 凭据"><button type="button" @click="copyAdminKey">复制</button></div></div><p v-if="adminError" class="form-error">{{ adminError }}</p>
+            </template>
+          </div>
+        </div>
+      </section>
     </main>
 
     <div v-if="contactEditorOpen" class="modal-backdrop" @click.self="contactEditorOpen=false">
       <form class="compose contact-form" @submit.prevent="saveContact"><header><h2>{{ contactOriginalPhone?'编辑联系人':'添加联系人' }}</h2><button type="button" class="close" @click="contactEditorOpen=false">关闭</button></header><label>电话号码<input v-model.trim="contactDraft.phone" inputmode="tel" autocomplete="tel" pattern="\+?[0-9]{5,20}" maxlength="21" :readonly="!!contactOriginalPhone" required placeholder="例如：13800138000"></label><label>姓名或显示备注<input v-model.trim="contactDraft.name" maxlength="80" required placeholder="例如：张先生、客服、快递"></label><label>详细备注<textarea v-model="contactDraft.note" maxlength="500" placeholder="公司、用途等补充信息（可选）"></textarea><small>{{ contactDraft.note.length }}/500</small></label><p v-if="contactOriginalPhone" class="hint">电话号码是联系人索引；如需改号码，请新建联系人。</p><div v-if="contactError" class="form-error">{{ contactError }}</div><footer><button type="button" @click="contactEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer></form>
     </div>
     <div v-if="blacklistEditorOpen" class="modal-backdrop" @click.self="blacklistEditorOpen=false">
-      <form class="compose contact-form" @submit.prevent="saveBlacklist"><header><h2>{{ blacklistOriginalPhone?'编辑黑名单':'加入黑名单' }}</h2><button type="button" class="close" @click="blacklistEditorOpen=false">关闭</button></header><label>电话号码<input v-model.trim="blacklistDraft.phone" inputmode="tel" autocomplete="tel" pattern="\+?[0-9]{5,20}" maxlength="21" :readonly="!!blacklistOriginalPhone" required placeholder="例如：10086"></label><label>显示备注<input v-model.trim="blacklistDraft.label" maxlength="80" placeholder="例如：广告短信（可选）"></label><label>详细备注<textarea v-model="blacklistDraft.note" maxlength="500" placeholder="加入原因等补充信息（可选）"></textarea><small>{{ blacklistDraft.note.length }}/500</small></label><div class="blacklist-notice compact-notice">加入后，该号码之后收到的短信只存入黑名单，机器人和通用 Webhook 均不推送。</div><div v-if="blacklistError" class="form-error">{{ blacklistError }}</div><footer><button type="button" @click="blacklistEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer></form>
+      <form class="compose contact-form" @submit.prevent="saveBlacklist"><header><h2>{{ blacklistOriginalPhone?'编辑黑名单规则':'添加黑名单规则' }}</h2><button type="button" class="close" @click="blacklistEditorOpen=false">关闭</button></header><label>匹配方式<select v-model="blacklistDraft.match_type"><option value="exact">精确匹配</option><option value="contains">包含匹配</option><option value="regex">正则表达式</option></select></label><label>{{ blacklistDraft.match_type==='exact'?'电话号码':'匹配规则' }}<input v-model.trim="blacklistDraft.phone" :inputmode="blacklistDraft.match_type==='exact'?'tel':'text'" autocomplete="off" :pattern="blacklistDraft.match_type==='exact'?'\\+?[0-9]{5,20}':undefined" :maxlength="blacklistDraft.match_type==='exact'?21:160" :readonly="!!blacklistOriginalPhone" required :placeholder="blacklistDraft.match_type==='exact'?'例如：10086':blacklistDraft.match_type==='contains'?'例如：1069':'例如：^95\\d{3}$'"></label><p v-if="blacklistDraft.match_type==='contains'" class="hint">发送方号码中只要包含该文本就会命中。</p><p v-if="blacklistDraft.match_type==='regex'" class="hint">使用正则搜索发送方号码；保存时会校验表达式是否合法。</p><label>显示备注<input v-model.trim="blacklistDraft.label" maxlength="80" placeholder="例如：广告短信（可选）"></label><label>详细备注<textarea v-model="blacklistDraft.note" maxlength="500" placeholder="加入原因等补充信息（可选）"></textarea><small>{{ blacklistDraft.note.length }}/500</small></label><div class="blacklist-notice compact-notice">命中规则的短信只存入黑名单，机器人和通用 Webhook 均不推送。</div><div v-if="blacklistError" class="form-error">{{ blacklistError }}</div><footer><button type="button" @click="blacklistEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer></form>
+    </div>
+    <div v-if="adRuleEditorOpen" class="modal-backdrop" @click.self="adRuleEditorOpen=false">
+      <form class="compose contact-form" @submit.prevent="saveAdRule">
+        <header><h2>{{ adRuleOriginalId?'编辑广告规则':'添加广告规则' }}</h2><button type="button" class="close" @click="adRuleEditorOpen=false">关闭</button></header>
+        <label>匹配范围<select v-model="adRuleDraft.field"><option value="body">短信内容</option><option value="phone">发送号码</option><option value="both">号码 + 内容</option></select></label>
+        <label>匹配方式<select v-model="adRuleDraft.match_type"><option value="contains">包含匹配</option><option value="regex">正则表达式</option></select></label>
+        <label>过滤规则<input v-model.trim="adRuleDraft.pattern" maxlength="160" required :placeholder="adRuleDraft.match_type==='regex'?'例如：(退订|拒收请回复)$':'例如：退订'"></label>
+        <p class="hint">广告规则只负责归档广告，不会加入黑名单；黑名单优先级高于广告过滤。</p>
+        <label>规则备注<input v-model.trim="adRuleDraft.label" maxlength="80" placeholder="例如：营销退订短信"></label>
+        <label class="toggle-label"><input v-model="adRuleDraft.enabled" type="checkbox">启用此规则</label>
+        <div v-if="adRuleError" class="form-error">{{ adRuleError }}</div>
+        <footer><button type="button" @click="adRuleEditorOpen=false">取消</button><button class="primary" type="submit">保存</button></footer>
+      </form>
     </div>
   </div>
 </template>
