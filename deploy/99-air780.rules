@@ -1,8 +1,20 @@
-# Allow members of dialout to access all AirM2M USB serial interfaces. The
-# generic ModemManager probe misidentifies this LuatOS device and competes with
-# the gateway for its AT port, so keep ModemManager away from these ports.
+# Air780 is a composite USB device (RNDIS + multiple ACM ports). Ignore the
+# whole physical device in ModemManager, not only its tty children; otherwise
+# ModemManager can still schedule probes through the RNDIS/USB parent whenever
+# the module re-enumerates.
+SUBSYSTEM=="usb", ATTR{idVendor}=="19d1", ATTR{idProduct}=="0001", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Keep Air780 out of runtime autosuspend. power/control=on already prevents
+# runtime suspend on most systems; autosuspend=-1 makes the intent persistent
+# across re-enumeration and future host policy changes.
+SUBSYSTEM=="usb", ATTR{idVendor}=="19d1", ATTR{idProduct}=="0001", TEST=="power/control", ATTR{power/control}="on"
+SUBSYSTEM=="usb", ATTR{idVendor}=="19d1", ATTR{idProduct}=="0001", TEST=="power/autosuspend", ATTR{power/autosuspend}="-1"
+
+# Allow members of dialout to access all AirM2M USB serial interfaces and keep
+# ModemManager away from every ACM child.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="19d1", ATTRS{idProduct}=="0001", GROUP="dialout", MODE="0660", TAG+="systemd", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"
 
-# The SMS firmware also exposes an RNDIS network adapter. NetworkManager's
-# managed=0 device rule keeps it isolated by default while still allowing the
-# authenticated 4G switch service to manage it temporarily.
+# The SMS firmware also exposes an RNDIS network adapter. Mark the net child as
+# ignored by ModemManager as well. NetworkManager isolation is handled by the
+# companion host-network guard configuration.
+SUBSYSTEM=="net", ATTRS{idVendor}=="19d1", ATTRS{idProduct}=="0001", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1"

@@ -28,7 +28,24 @@ else
   echo "未检测到受支持的网络管理器；请先为 Air780 RNDIS 禁用 DHCP 和默认路由。" >&2
   exit 1
 fi
-sudo udevadm trigger
+# Re-apply the Air780 rules to devices that are already attached. Restart
+# ModemManager afterwards so it drops any previously scheduled probe context and
+# re-discovers the devices with ID_MM_DEVICE_IGNORE already present.
+sudo udevadm trigger --subsystem-match=usb
+sudo udevadm trigger --subsystem-match=tty
+sudo udevadm trigger --subsystem-match=net
+sudo udevadm settle
+if systemctl is-active --quiet ModemManager; then
+  sudo systemctl restart ModemManager
+fi
+
+echo "Air780 USB 电源策略："
+for dev in /sys/bus/usb/devices/*; do
+  [ -f "$dev/idVendor" ] || continue
+  [ "$(cat "$dev/idVendor" 2>/dev/null):$(cat "$dev/idProduct" 2>/dev/null)" = "19d1:0001" ] || continue
+  printf "%s control=%s autosuspend=%s\n" "$(basename "$dev")"     "$(cat "$dev/power/control" 2>/dev/null || echo unknown)"     "$(cat "$dev/power/autosuspend" 2>/dev/null || echo unknown)"
+done
+
 echo "安装后默认路由："
 ip route show default || true
 echo "完成。重新插拔 Air780 后运行 ./scripts/check-host-network.sh 验证。"
