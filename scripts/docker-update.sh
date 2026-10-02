@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$script_dir/compose.yaml" ]; then
+  project_dir="$script_dir"
+else
+  project_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+fi
 cd "$project_dir"
 
 service="sms-gateway"
