@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 from sms_gateway.modem import ModemWorker, SerialModem
+from sms_gateway.manager import DeviceManager
 from sms_gateway.store import MessageStore
 from sms_gateway.app import Gateway, handler_factory
 from sms_gateway.admin import AdminAccess
@@ -31,6 +32,21 @@ class GatewayTests(unittest.TestCase):
         modem = SerialModem("auto")
         modem._dispatch({"type": "ready", "signal": {"rsrp": -101, "csq": 21}})
         self.assertEqual(modem.device_info["signal"]["rsrp"], -101)
+
+    def test_device_manager_probes_only_vuart_per_physical_air780(self):
+        manager = DeviceManager.__new__(DeviceManager)
+        manager.configured_port = "auto"
+        parents = {
+            "/dev/ttyACM0": "/sys/devices/air780-a",
+            "/dev/ttyACM1": "/sys/devices/air780-a",
+            "/dev/ttyACM2": "/sys/devices/air780-a",
+            "/dev/ttyACM3": "/sys/devices/air780-b",
+            "/dev/ttyACM4": "/sys/devices/air780-b",
+            "/dev/ttyACM5": "/sys/devices/air780-b",
+        }
+        with patch("sms_gateway.manager.glob.glob", side_effect=[list(parents), []]), \
+                patch.object(DeviceManager, "_air780_parent", side_effect=parents.get):
+            self.assertEqual(manager._ports(), ["/dev/ttyACM5", "/dev/ttyACM2"])
 
     def test_store_deduplicates_modem_index(self):
         with tempfile.NamedTemporaryFile() as db:

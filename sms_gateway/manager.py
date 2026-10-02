@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import glob
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .modem import ModemWorker, ReceivedSms, SerialModem
@@ -44,10 +46,44 @@ class DeviceManager(threading.Thread):
         self._devices: dict[str, RuntimeDevice] = {}
         self._rejected_until: dict[str, float] = {}
 
+    @staticmethod
+    def _port_number(port: str) -> int:
+        match = re.search(r"(\d+)$", port)
+        return int(match.group(1)) if match else -1
+
+    @staticmethod
+    def _air780_parent(port: str) -> str | None:
+        """Return the physical Air780 USB sysfs node owning one tty port."""
+        try:
+            device = (Path("/sys/class/tty") / Path(port).name / "device").resolve()
+        except OSError:
+            return None
+        for parent in (device, *device.parents):
+            try:
+                if ((parent / "idVendor").read_text().strip().lower() == "19d1"
+                        and (parent / "idProduct").read_text().strip().lower() == "0001"):
+                    return str(parent)
+            except OSError:
+                continue
+        return None
+
     def _ports(self) -> list[str]:
         if self.configured_port != "auto":
             return [self.configured_port]
-        return sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"), reverse=True)
+
+        # Air780 exposes three ACM ports per physical USB device. The SMS VUART is
+        # the highest-numbered ACM port for that device. Probe only that port so a
+        # reconnect does not make the gateway open the modem's other control ports.
+        acm_groups: dict[str, list[str]] = {}
+        fallback: list[str] = []
+        for port in glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"):
+            parent = self._air780_parent(port) if Path(port).name.startswith("ttyACM") else None
+            if parent:
+                acm_groups.setdefault(parent, []).append(port)
+            else:
+                fallback.append(port)
+        preferred = [max(ports, key=self._port_number) for ports in acm_groups.values()]
+        return sorted(preferred + fallback, key=self._port_number, reverse=True)
 
     def run(self) -> None:
         self.store.mark_all_devices_offline()
@@ -88,7 +124,7 @@ class DeviceManager(threading.Thread):
             log.info("device %s online on %s", device_id, port)
         except Exception as exc:
             modem.close()
-            self._rejected_until[port] = time.monotonic() + 30
+            self._rejected_until[port] = time.monotonic() + 5
             log.debug("port %s is not an SMS bridge: %s", port, exc)
 
     def _remove_offline(self) -> None:
