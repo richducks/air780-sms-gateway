@@ -101,6 +101,8 @@ USB 模式   privileged: true
 
 该模式适用于一台主机接入多块 Air780。每块 Air780 通常产生 3 个 `ttyACM`，两块设备通常会看到 6 个串口。v1.3.0-rc2 起，多设备发现会按物理 USB 设备分组，只探测每块模块对应的 VUART，不再把同一块模块的 3 个 ACM 口全部当作独立候选串口反复打开。
 
+v1.3.0-rc3 起，设备管理器还会识别 Linux USB `devnum` 变化：模块重新枚举后必须先连续稳定约 8 秒才重新接管；短时间重复掉线会按物理 USB 路径执行 5、10、20、40、80、120 秒指数退避。稳定运行 120 秒后自动清空故障计数。这样一块故障模块的抖动不会让另一块正常模块反复重连。
+
 ## 4. USB 权限模式
 
 默认 `compose.yaml` 使用 `privileged: true`，这是为了支持多套 Air780 动态增加、串口编号变化和运行时热插拔。只应在专用、可信的短信网关主机上使用。
@@ -199,7 +201,7 @@ online_devices：2
 total_devices：2
 ```
 
-如果 Linux 已经看到 2 块 USB 和 6 个 ACM，但 `online_devices` 仍只有 1，先确认网关版本至少为 `1.3.0-rc2`。如果 `journalctl -k` 持续出现 `USB disconnect`、`error -71` 或 `error -110`，则问题发生在 Docker 之前，应继续检查 USB 直通、线材、供电和模块硬件。
+如果 Linux 已经看到 2 块 USB 和 6 个 ACM，但 `online_devices` 仍只有 1，先确认网关版本至少为 `1.3.0-rc3`。如果 `journalctl -k` 持续出现 `USB disconnect`、`error -71` 或 `error -110`，则问题发生在 Docker 之前；rc3 只能隔离抖动、自动恢复，不能修复物理 USB 链路，仍应继续检查 USB 直通、线材、供电和模块硬件。
 
 升级和重建容器时不要执行：
 

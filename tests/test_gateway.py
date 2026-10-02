@@ -48,6 +48,15 @@ class GatewayTests(unittest.TestCase):
                 patch.object(DeviceManager, "_air780_parent", side_effect=parents.get):
             self.assertEqual(manager._ports(), ["/dev/ttyACM5", "/dev/ttyACM2"])
 
+    def test_device_manager_usb_backoff_is_exponential_and_capped(self):
+        self.assertEqual(DeviceManager._backoff_seconds(1), 5)
+        self.assertEqual(DeviceManager._backoff_seconds(2), 10)
+        self.assertEqual(DeviceManager._backoff_seconds(3), 20)
+        self.assertEqual(DeviceManager._backoff_seconds(4), 40)
+        self.assertEqual(DeviceManager._backoff_seconds(5), 80)
+        self.assertEqual(DeviceManager._backoff_seconds(6), 120)
+        self.assertEqual(DeviceManager._backoff_seconds(10), 120)
+
     def test_store_deduplicates_modem_index(self):
         with tempfile.NamedTemporaryFile() as db:
             store = MessageStore(db.name)
