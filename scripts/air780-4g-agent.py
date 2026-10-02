@@ -11,16 +11,11 @@ import re
 import socketserver
 import subprocess
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 SOCKET = Path('/run/air780-4g/control.sock')
 NETWORK = Path('/etc/systemd/network/05-air780-rndis.network')
-MONITOR = Path('/usr/local/libexec/air780-luatos-tools')
 NM_PREFIX = 'air780-4g-'
-signal_cache = {}
-monitor_threads = {}
 
 
 def air780_parent(device):
@@ -33,42 +28,6 @@ def air780_parent(device):
             pass
         device = device.parent
     return None
-
-
-def log_ports():
-    """Choose the first ACM interface of each Air780 USB composite device."""
-    groups = {}
-    for tty in Path('/sys/class/tty').glob('ttyACM*'):
-        parent = air780_parent((tty / 'device').resolve())
-        if parent:
-            groups.setdefault(parent, []).append('/dev/' + tty.name)
-    return [min(ports) for ports in groups.values()]
-
-
-def monitor_port(port):
-    try:
-        process = subprocess.Popen([str(MONITOR), 'monitor', '--port', port, '--stream'],
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   text=True, bufsize=1)
-        with process:
-            for line in process.stdout:
-                match = re.search(r'\+CSQ:\s*(\d+)', line)
-                if match:
-                    value = int(match.group(1))
-                    if 0 <= value <= 31:
-                        signal_cache[port] = (value, time.monotonic())
-    except OSError:
-        pass
-
-
-def monitor_loop():
-    while True:
-        for port in log_ports():
-            if port not in monitor_threads or not monitor_threads[port].is_alive():
-                thread = threading.Thread(target=monitor_port, args=(port,), daemon=True)
-                monitor_threads[port] = thread
-                thread.start()
-        time.sleep(5)
 
 
 def interfaces():
@@ -147,19 +106,10 @@ def state():
                             'serial_ports': interface_ports(link)} for link in links],
             'network_backend': network_backend(),
             'route_policy': '4G 路由优先级低于主网络，不接管 DNS',
-            **signal_status()}
-
-
-def signal_status():
-    value = None
-    for port in log_ports():
-        sample = signal_cache.get(port)
-        if sample and time.monotonic() - sample[1] < 90:
-            value = sample[0]
-            break
-    if value is not None:
-        return {'signal': {'csq': value}, 'signal_supported': True}
-    return {'signal': None, 'signal_supported': False}
+            # Signal strength is reported by the SMS bridge itself. The host-side
+            # 4G switch must never open ttyACM ports, otherwise it races the SMS
+            # gateway and can make devices flap or appear offline.
+            'signal': None, 'signal_supported': False}
 
 
 def set_networkmanager(links, value):
@@ -260,7 +210,6 @@ class Handler(socketserver.StreamRequestHandler):
 
 if __name__ == '__main__':
     SOCKET.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    threading.Thread(target=monitor_loop, daemon=True, name='air780-signal').start()
     with socketserver.ThreadingUnixStreamServer(str(SOCKET), Handler) as server:
         os.chown(SOCKET, 0, grp.getgrnam('dialout').gr_gid)
         os.chmod(SOCKET, 0o660)
