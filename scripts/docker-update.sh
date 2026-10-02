@@ -28,16 +28,27 @@ echo "准备升级 Air780 短信网关"
 echo "镜像: $AIR780_IMAGE"
 echo "数据卷 sms-data 不会被删除。"
 
-docker compose pull "$service"
-docker compose up -d --no-build "$service"
-
 container_name="air780-sms-gateway"
+stamp=$(date +%Y%m%d-%H%M%S)
+if docker inspect "$container_name" >/dev/null 2>&1; then
+  echo "升级前备份 SQLite 数据库..."
+  backup_path="/data/sms_gateway.db.pre-upgrade-$stamp"
+  docker exec "$container_name" sh -c "if [ -f /data/sms_gateway.db ]; then cp -p /data/sms_gateway.db '$backup_path'; fi"
+  echo "备份位置: $backup_path"
+fi
+
+docker compose pull "$service"
+docker compose up -d --no-build --force-recreate "$service"
+
 for _ in $(seq 1 30); do
   status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_name" 2>/dev/null || true)
   case "$status" in
     healthy|running)
       echo "升级完成，容器状态: $status"
       docker compose ps
+      echo "当前健康状态："
+      curl -fsS http://127.0.0.1:8787/health || true
+      echo
       exit 0
       ;;
     unhealthy|exited|dead)

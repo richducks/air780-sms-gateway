@@ -108,7 +108,7 @@ bash scripts/docker-update.sh
 ```bash
 cd /你的目录/air780-sms-gateway
 docker compose pull sms-gateway
-docker compose up -d --no-build sms-gateway
+docker compose up -d --no-build --force-recreate sms-gateway
 ```
 
 其过程是：
@@ -118,7 +118,7 @@ docker compose pull
         ↓
 从 GHCR 下载最新镜像
         ↓
-docker compose up -d --no-build
+docker compose up -d --no-build --force-recreate
         ↓
 使用新镜像替换旧容器并后台启动
 ```
@@ -161,8 +161,8 @@ curl http://127.0.0.1:8787/health
 ```json
 {
   "ok": true,
-  "version": "1.2.1",
-  "online_devices": 1,
+  "version": "1.3.0-rc2",
+  "online_devices": 2,
   "modem_connected": true
 }
 ```
@@ -173,6 +173,8 @@ curl http://127.0.0.1:8787/health
 - `version`：当前实际运行的网关版本；
 - `online_devices`：当前在线 Air780 设备数量；
 - `modem_connected`：是否至少有一台 Air780 已连接。
+
+两块 Air780 的当前生产验收标准是：Linux 能看到 2 个 `19d1:0001` USB 设备、通常出现 6 个 `ttyACM`，并且 `/health` 返回 `online_devices: 2`。v1.3.0-rc2 起，多设备发现按物理 USB 分组，只打开每块模块的短信 VUART，改善 USB 重连后的双设备自动恢复。
 
 只看到 `ok: true` 不代表 USB 模块一定在线，还要同时检查 `online_devices` 和 `modem_connected`。
 

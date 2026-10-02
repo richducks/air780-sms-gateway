@@ -26,6 +26,38 @@ if grep -q '请替换' .env.docker; then
   exit 1
 fi
 
-docker compose build
-docker compose up -d
-docker compose ps
+service="sms-gateway"
+image="${AIR780_IMAGE:-ghcr.io/richducks/air780-sms-gateway:latest}"
+export AIR780_IMAGE="$image"
+
+echo "准备部署 Air780 短信网关"
+echo "镜像: $AIR780_IMAGE"
+echo "数据卷 sms-data 将用于持久化短信和配置。"
+
+docker compose pull "$service"
+docker compose up -d --no-build "$service"
+
+container_name="air780-sms-gateway"
+for _ in $(seq 1 30); do
+  status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_name" 2>/dev/null || true)
+  case "$status" in
+    healthy|running)
+      echo "部署完成，容器状态: $status"
+      docker compose ps
+      curl -fsS http://127.0.0.1:8787/health || true
+      echo
+      exit 0
+      ;;
+    unhealthy|exited|dead)
+      echo "部署后容器状态异常: $status" >&2
+      docker compose logs --tail=100 "$service" >&2 || true
+      exit 1
+      ;;
+  esac
+  sleep 2
+done
+
+echo "容器已启动，但健康检查在等待时间内未通过。" >&2
+docker compose ps >&2 || true
+docker compose logs --tail=100 "$service" >&2 || true
+exit 1

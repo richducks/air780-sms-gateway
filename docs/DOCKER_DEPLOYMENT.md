@@ -46,7 +46,9 @@ chmod 600 .env.docker
 
 把生成的 API Token 和 Webhook Secret 写入 `.env.docker`。不要把真实密钥提交到代码仓库。飞书 Hook 可以留空，启动后在网页“设置 → 飞书机器人”中维护多个带备注的机器人。
 
-## 3. 构建和启动
+## 3. 拉取并启动（生产推荐）
+
+当前生产方案以 GitHub Container Registry（GHCR）发布镜像为准，不在目标服务器现场编译。这样目标机只负责运行容器，版本来源更明确，也更容易确认是否真正完成升级。
 
 可以直接使用一键部署脚本：
 
@@ -54,20 +56,50 @@ chmod 600 .env.docker
 ./scripts/docker-deploy.sh
 ```
 
-也可以手动执行：
+脚本默认拉取：
 
-```bash
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose logs -f sms-gateway
+```text
+ghcr.io/richducks/air780-sms-gateway:latest
 ```
 
-浏览器访问 `http://服务器IP:8787/`，在设置页填入 `.env.docker` 中的 API Token。
+手动部署等价于：
+
+```bash
+docker compose pull sms-gateway
+docker compose up -d --no-build sms-gateway
+docker compose ps
+curl http://127.0.0.1:8787/health
+```
+
+`--no-build` 很重要：它保证生产服务器使用 GitHub 已发布镜像，而不是因为本地残留源码或 Dockerfile 又构建出另一套版本。
+
+如果是开发机，需要验证尚未发布到 GHCR 的本地源码，再使用：
+
+```bash
+docker compose build --pull
+docker compose up -d
+```
+
+浏览器访问 `http://服务器IP:8787/`。网页后台使用账号密码登录；API Token 主要留给外部系统和自动化调用。
 
 短信页按设备与号码显示会话，可在底部直接回复；支持 Enter 发送、Shift+Enter 换行。通讯录可保存号码、姓名和详细备注，历史短信会立即显示联系人名称。设置页可配置多个飞书和钉钉群机器人。钉钉自定义机器人可选填以 `SEC` 开头的加签密钥。
 
 SQLite 数据及网页保存的飞书机器人配置位于 Docker 命名卷 `sms-data`，重新构建或升级容器不会丢失。
+
+当前已验证的生产容器基线如下：
+
+```text
+镜像       ghcr.io/richducks/air780-sms-gateway:latest
+容器名     air780-sms-gateway
+端口       8787:8787
+重启策略   unless-stopped
+数据库     sms-data:/data
+4G 控制    /run/air780-4g:/run/air780-4g:ro
+USB 模式   privileged: true
+安全选项   no-new-privileges:true
+```
+
+该模式适用于一台主机接入多块 Air780。每块 Air780 通常产生 3 个 `ttyACM`，两块设备通常会看到 6 个串口。v1.3.0-rc2 起，多设备发现会按物理 USB 设备分组，只探测每块模块对应的 VUART，不再把同一块模块的 3 个 ACM 口全部当作独立候选串口反复打开。
 
 ## 4. USB 权限模式
 
@@ -118,7 +150,7 @@ ghcr.io/richducks/air780-sms-gateway:latest
 ```bash
 cd air780-sms-gateway
 docker compose pull sms-gateway
-docker compose up -d --no-build sms-gateway
+docker compose up -d --no-build --force-recreate sms-gateway
 ```
 
 也可以直接运行项目内的一键升级脚本：
@@ -127,7 +159,7 @@ docker compose up -d --no-build sms-gateway
 bash scripts/docker-update.sh
 ```
 
-脚本会拉取远程 `latest` 镜像、重建容器并检查健康状态。`sms-data` 命名卷不会被删除。
+脚本会先在 `/data` 内生成带时间戳的 SQLite 备份，再拉取远程 `latest` 镜像、强制重建容器并检查健康状态。`sms-data` 命名卷不会被删除。
 
 网关对单条短信的临时发送失败默认会自动重试 3 次。生产环境可在 `.env.docker` 中设置 `SMS_GATEWAY_SEND_ATTEMPTS=3` 调整次数；建议保持 2–3 次，不要设置过大，以免真实故障时长时间占用发送队列。
 
@@ -147,6 +179,35 @@ docker compose up -d
 ```
 
 GitHub `main` 分支更新后，`.github/workflows/docker-publish.yml` 会自动构建并发布 `latest`、Git 标签和提交 SHA 镜像。升级前仍建议先备份数据库。
+
+### 6.3 双 Air780 升级后验收
+
+生产环境接两块 Air780 时，不要只看 `ok: true`。至少检查：
+
+```bash
+lsusb | grep '19d1:0001'
+ls -l /dev/ttyACM*
+curl http://127.0.0.1:8787/health
+```
+
+典型的两设备结果应为：
+
+```text
+19d1:0001 设备数量：2
+ttyACM 数量：6
+online_devices：2
+total_devices：2
+```
+
+如果 Linux 已经看到 2 块 USB 和 6 个 ACM，但 `online_devices` 仍只有 1，先确认网关版本至少为 `1.3.0-rc2`。如果 `journalctl -k` 持续出现 `USB disconnect`、`error -71` 或 `error -110`，则问题发生在 Docker 之前，应继续检查 USB 直通、线材、供电和模块硬件。
+
+升级和重建容器时不要执行：
+
+```bash
+docker compose down -v
+```
+
+`-v` 会删除命名卷，可能一并删除短信、联系人、账号和配置数据。
 
 ## 7. 发布前验收
 
