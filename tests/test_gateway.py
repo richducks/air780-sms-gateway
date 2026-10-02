@@ -57,6 +57,25 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(DeviceManager._backoff_seconds(6), 120)
         self.assertEqual(DeviceManager._backoff_seconds(10), 120)
 
+    def test_device_manager_new_usb_generation_does_not_inherit_backoff(self):
+        manager = DeviceManager.__new__(DeviceManager)
+        manager._generation_failures = {}
+        manager._generation_blocked_until = {}
+        manager._candidate_seen_since = {}
+        manager._backoff_base_seconds = 5.0
+        manager._backoff_max_seconds = 120.0
+
+        first = manager._register_generation_failure(
+            "/sys/devices/air780#10", "/sys/devices/air780", "first")
+        second = manager._register_generation_failure(
+            "/sys/devices/air780#10", "/sys/devices/air780", "second")
+        fresh = manager._register_generation_failure(
+            "/sys/devices/air780#11", "/sys/devices/air780", "fresh")
+
+        self.assertEqual(first, 5)
+        self.assertEqual(second, 10)
+        self.assertEqual(fresh, 5)
+
     def test_store_deduplicates_modem_index(self):
         with tempfile.NamedTemporaryFile() as db:
             store = MessageStore(db.name)

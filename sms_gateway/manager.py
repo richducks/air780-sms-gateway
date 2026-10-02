@@ -48,8 +48,8 @@ class DeviceManager(threading.Thread):
         self._lock = threading.RLock()
         self._devices: dict[str, RuntimeDevice] = {}
         self._candidate_seen_since: dict[str, float] = {}
-        self._parent_failures: dict[str, int] = {}
-        self._parent_blocked_until: dict[str, float] = {}
+        self._generation_failures: dict[str, int] = {}
+        self._generation_blocked_until: dict[str, float] = {}
 
         # USB links that flap can enumerate successfully for only a second or two.
         # Do not hand such a transient device to the SMS worker immediately.
@@ -94,20 +94,29 @@ class DeviceManager(threading.Thread):
         failures = max(1, failures)
         return min(maximum, base * (2 ** min(failures - 1, 8)))
 
-    def _register_parent_failure(self, parent_key: str, reason: str) -> float:
-        failures = self._parent_failures.get(parent_key, 0) + 1
-        self._parent_failures[parent_key] = failures
+    def _register_generation_failure(
+            self, generation: str, parent_key: str, reason: str) -> float:
+        failures = self._generation_failures.get(generation, 0) + 1
+        self._generation_failures[generation] = failures
         delay = self._backoff_seconds(
             failures, self._backoff_base_seconds, self._backoff_max_seconds)
-        self._parent_blocked_until[parent_key] = time.monotonic() + delay
-        log.warning("Air780 USB path %s unstable (%d failures); retry in %.0fs: %s",
-                    parent_key, failures, delay, reason)
+        self._generation_blocked_until[generation] = time.monotonic() + delay
+        log.warning(
+            "Air780 USB instance %s on %s unstable (%d failures); retry in %.0fs: %s",
+            generation, parent_key, failures, delay, reason)
         return delay
 
-    def _reset_parent_health(self, parent_key: str) -> None:
-        if self._parent_failures.pop(parent_key, None):
-            log.info("Air780 USB path %s stable again; failure backoff reset", parent_key)
-        self._parent_blocked_until.pop(parent_key, None)
+    def _reset_generation_health(self, generation: str, parent_key: str) -> None:
+        if self._generation_failures.pop(generation, None):
+            log.info(
+                "Air780 USB instance %s on %s stable again; failure backoff reset",
+                generation, parent_key)
+        self._generation_blocked_until.pop(generation, None)
+
+    def _forget_generation(self, generation: str) -> None:
+        self._candidate_seen_since.pop(generation, None)
+        self._generation_failures.pop(generation, None)
+        self._generation_blocked_until.pop(generation, None)
 
     def _ports(self) -> list[str]:
         if self.configured_port != "auto":
@@ -146,15 +155,20 @@ class DeviceManager(threading.Thread):
                     continue
                 if port in claimed_ports or parent_key in claimed_parents:
                     continue
-                if self._parent_blocked_until.get(parent_key, 0) > now:
+                if self._generation_blocked_until.get(generation, 0) > now:
                     continue
                 self._probe(port, parent_key, generation)
 
             # A re-enumerated device gets a new generation token, so its stability
             # window starts over even if Linux reuses the same ttyACM number.
-            for generation in list(self._candidate_seen_since):
+            known_generations = (
+                set(self._candidate_seen_since)
+                | set(self._generation_failures)
+                | set(self._generation_blocked_until)
+            )
+            for generation in known_generations:
                 if generation not in visible_generations:
-                    self._candidate_seen_since.pop(generation, None)
+                    self._forget_generation(generation)
 
             self.stop_event.wait(1)
 
@@ -181,6 +195,7 @@ class DeviceManager(threading.Thread):
                     modem.close()
                     return
                 self._devices[device_id] = runtime
+            self._reset_generation_health(generation, parent_key)
             self.store.upsert_device(device_id, imei, "online", port, runtime.firmware_version)
             worker.start()
             if self.on_state:
@@ -188,7 +203,8 @@ class DeviceManager(threading.Thread):
             log.info("device %s online on %s (%s)", device_id, port, parent_key)
         except Exception as exc:
             modem.close()
-            self._register_parent_failure(parent_key, f"probe failed on {port}: {exc}")
+            self._register_generation_failure(
+                generation, parent_key, f"probe failed on {port}: {exc}")
 
     def _remove_offline(self) -> None:
         with self._lock:
@@ -196,7 +212,8 @@ class DeviceManager(threading.Thread):
                 if runtime.worker.is_alive():
                     online_age = time.monotonic() - runtime.online_since
                     if online_age >= self._stable_reset_seconds:
-                        self._reset_parent_health(runtime.parent_key)
+                        self._reset_generation_health(
+                            runtime.generation, runtime.parent_key)
                     self.store.upsert_device(device_id, runtime.imei, "online", runtime.port,
                                              runtime.firmware_version, runtime.worker.last_error)
                     continue
@@ -205,15 +222,16 @@ class DeviceManager(threading.Thread):
                 error = runtime.worker.last_error or "USB/serial worker stopped"
                 online_age = time.monotonic() - runtime.online_since
                 if online_age < self._stable_reset_seconds:
-                    self._register_parent_failure(
-                        runtime.parent_key,
+                    self._register_generation_failure(
+                        runtime.generation, runtime.parent_key,
                         f"device {runtime.imei} dropped after {online_age:.1f}s: {error}")
                 else:
                     # A single disconnect after a long healthy run gets only the
-                    # minimum retry delay instead of inheriting an old flap history.
-                    self._reset_parent_health(runtime.parent_key)
-                    self._register_parent_failure(
-                        runtime.parent_key,
+                    # minimum retry delay for this exact USB enumeration instance.
+                    self._reset_generation_health(
+                        runtime.generation, runtime.parent_key)
+                    self._register_generation_failure(
+                        runtime.generation, runtime.parent_key,
                         f"device {runtime.imei} disconnected after stable run: {error}")
 
                 self.store.upsert_device(device_id, runtime.imei, "offline", None,
